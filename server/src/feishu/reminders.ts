@@ -1,0 +1,106 @@
+import {
+  getDueReminders,
+  getEarliestPendingReminder,
+  markReminderSent,
+  expireOverdueReminders,
+} from '../db/reminders.js'
+import { replyMessage } from './messages.js'
+import { generateReminderText, setOnReminderAdded } from '../llm.js'
+import { getUserName } from './handler.js'
+
+// 主调度精度:为「最近一条提醒」设动态 setTimeout,到点精确触发,中间零空转。
+// 兜底轮询间隔:每 10 分钟慢扫一次,防止动态定时器因误差/新增提醒错过。
+const BACKSTOP_INTERVAL_MS = 10 * 60 * 1000
+
+let dynamicTimer: NodeJS.Timeout | null = null
+
+// 发送一条提醒:LLM 生成活泼文案 @用户,失败回退多样化模板
+async function sendReminder(r: {
+  id: number
+  user_open_id: string
+  content: string
+  original_message_id: string
+}): Promise<void> {
+  const userName = await getUserName(r.user_open_id).catch(() => '你')
+  const text = await generateReminderText(r.content, userName || '你')
+  const body = `<at user_id="${r.user_open_id}"></at> ${text}`
+  await replyMessage(r.original_message_id, body)
+  console.log('⏰ 已发送提醒 id=', r.id, '内容:', r.content)
+}
+
+// 把所有「已到点」的 pending 提醒一次性发出去
+async function flushDue(): Promise<void> {
+  const due = getDueReminders(Date.now())
+  await Promise.all(
+    due.map(async (r) => {
+      try {
+        await sendReminder(r)
+      } catch (err: any) {
+        console.error('【提醒发送失败】id=', r.id, 'msg:', err.response?.data?.msg || err.message)
+      } finally {
+        // 无论成败都标记 sent:原消息被撤回等情况会导致 reply 永久失败,避免无限重试打扰
+        markReminderSent(r.id)
+      }
+    }),
+  )
+}
+
+/**
+ * 动态调度:为最近一条 pending 提醒设一个精确 setTimeout。
+ * - 没有 pending → 啥也不设,等下次 addReminder 或兜底轮询再排
+ * - remind_at 已过去 → 立即触发
+ * 否则按 (remind_at - now) 设时器;触发后 flushDue + 重排下一条
+ */
+function scheduleNext(): void {
+  if (dynamicTimer) {
+    clearTimeout(dynamicTimer)
+    dynamicTimer = null
+  }
+
+  const earliest = getEarliestPendingReminder()
+  if (!earliest) return // 无待发提醒,零空转
+
+  const delay = Math.max(0, earliest.remind_at - Date.now())
+  dynamicTimer = setTimeout(async () => {
+    dynamicTimer = null
+    try {
+      await flushDue()
+    } catch (err: any) {
+      console.error('【提醒 flush 出错】', err.message)
+    }
+    // 处理完后重排下一条(若有)
+    scheduleNext()
+  }, delay)
+}
+
+// 兜底慢轮询:补动态定时器漏掉的情况(时钟漂移 / 新增提醒间未重排 / 进程刚恢复)
+function startBackstop(): void {
+  setInterval(async () => {
+    try {
+      await flushDue()
+    } catch (err: any) {
+      console.error('【兜底轮询 flush 出错】', err.message)
+    }
+    // 同时重排动态定时器,吸收新增的更早提醒
+    scheduleNext()
+  }, BACKSTOP_INTERVAL_MS)
+}
+
+/**
+ * 启动提醒调度器(混合模式)。
+ * - 启动时把过期的待发提醒标记为 expired(直接丢弃,不补发)
+ * - 动态 setTimeout 精确触发最近一条,中间零空转
+ * - 每 10 分钟兜底慢扫一次,防漏
+ */
+export function startReminderScheduler(): void {
+  const dropped = expireOverdueReminders(Date.now())
+  if (dropped > 0) console.log(`⏰ 启动时丢弃过期提醒 ${dropped} 条`)
+
+  // 启动即排最近一条(若有到点的立刻发)
+  flushDue().catch((e) => console.error('【启动 flush 出错】', e.message))
+  scheduleNext()
+  startBackstop()
+  // 注册钩子:每次新增提醒后重排定时器(若有更早的需提前触发)
+  setOnReminderAdded(scheduleNext)
+  console.log('⏰ 提醒调度器已启动(动态定时器 + 10分钟兜底轮询)')
+}
