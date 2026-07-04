@@ -17,4 +17,9 @@ export const config = {
   ANTHROPIC_BASE_URL: required('ANTHROPIC_BASE_URL'),
   ANTHROPIC_API_KEY: required('ANTHROPIC_API_KEY'),
   LLM_MODEL: process.env.LLM_MODEL || 'MiniMax-M3',
+  // 多维表格双写(可选:不配则只入 SQLite,跳过飞书表格写入)
+  BITABLE_APP_TOKEN: process.env.BITABLE_APP_TOKEN || '',
+  BITABLE_TABLE_ID: process.env.BITABLE_TABLE_ID || '',
+  // 多维表格链接(录入后回复里附上,便于点击查看)
+  BITABLE_LINK: process.env.BITABLE_LINK || '',
 }

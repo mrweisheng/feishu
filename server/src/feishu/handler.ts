@@ -5,6 +5,7 @@ import { fetchHistoryGap } from './history.js'
 import { askLLM, type LlmContext } from '../llm.js'
 import { replyMessage } from './messages.js'
 import { startReminderScheduler } from './reminders.js'
+import { subscribeBitable, handleBitableRecordChanged } from './bitable.js'
 
 // 飞书事件 payload 结构复杂,不做强类型化
 type FeishuEvent = Record<string, any>
@@ -183,16 +184,21 @@ export function startFeishuWorker(): void {
   // 异步拉取机器人 open_id(不阻塞启动;未就绪期间收到的 @消息会被跳过)
   loadBotOpenId().then((id) => { botOpenId = id })
 
-  // 注册消息事件
+  // 注册消息事件 + 多维表格记录变更事件(反向同步)
   const eventDispatcher = new EventDispatcher({}).register({
     'im.message.receive_v1': async (data: FeishuEvent) => {
       await handleIncomingMessage(data)
+    },
+    'drive.file.bitable_record_changed_v1': async (data: FeishuEvent) => {
+      await handleBitableRecordChanged(data)
     },
   })
 
   // 启动长连接
   wsClient.start({ eventDispatcher })
   console.log('✅ 飞书长连接已启动,正在监听群消息...')
+  // 订阅多维表格云文档事件(幂等),开启「表格改动 → 回写 SQLite」反向同步
+  subscribeBitable().catch((e) => console.warn('【订阅多维表格失败】', e.message ?? e))
 
   // 历史补漏调度:启动5秒后跑一次,之后每24小时一次(source=history,靠message_id去重)
   const ONE_DAY_MS = 24 * 60 * 60 * 1000

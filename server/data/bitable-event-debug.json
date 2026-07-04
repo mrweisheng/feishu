@@ -1,0 +1,342 @@
+{
+  "schema": "2.0",
+  "event_id": "89a277bb9dc886fd3ac4e30bf823a8be",
+  "token": "",
+  "create_time": "1783160302000",
+  "event_type": "drive.file.bitable_record_changed_v1",
+  "tenant_key": "1597936581be5740",
+  "app_id": "cli_aacec79ac8b81bb7",
+  "action_list": [
+    {
+      "action": "record_added",
+      "after_value": [
+        {
+          "field_id": "fld2RXmcgZ",
+          "field_value": "[{\"sequence\":\"18\",\"number\":\"18\"}]"
+        },
+        {
+          "field_id": "fldy4hw5aY",
+          "field_value": ""
+        },
+        {
+          "field_id": "fldkXvF7uD",
+          "field_value": "1783160302000"
+        },
+        {
+          "field_id": "fldyeYnmkI",
+          "field_value": "[{\"text\":\"红色宝马ZE8746车辆尾款\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldhskX4P7",
+          "field_identity_value": {
+            "users": [
+              {
+                "avatar_url": "https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp",
+                "en_name": "华星助手",
+                "name": "华星助手",
+                "user_id": {
+                  "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+                  "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+                  "user_id": null
+                }
+              }
+            ]
+          },
+          "field_value": "{\"users\":[{\"enName\":\"华星助手\",\"name\":\"华星助手\",\"userId\":\"7657381089484295134\",\"avatarUrl\":\"https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp\"}]}"
+        },
+        {
+          "field_id": "fldAxAEJ5m",
+          "field_value": "optb4okQvH"
+        },
+        {
+          "field_id": "fldUI4XEPA",
+          "field_value": "1783160302000"
+        },
+        {
+          "field_id": "fldk1paiIH",
+          "field_value": "[{\"text\":\"黄永清\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldiQU6IVm",
+          "field_value": "25242"
+        },
+        {
+          "field_id": "fldwMo1lq5",
+          "field_value": "[{\"text\":\"車輛總價+車輛雜費已結清\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldlgSkkHU",
+          "field_identity_value": {
+            "users": [
+              {
+                "avatar_url": "https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp",
+                "en_name": "华星助手",
+                "name": "华星助手",
+                "user_id": {
+                  "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+                  "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+                  "user_id": null
+                }
+              }
+            ]
+          },
+          "field_value": "{\"users\":[{\"name\":\"华星助手\",\"userId\":\"7657381089484295134\",\"avatarUrl\":\"https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp\",\"enName\":\"华星助手\"}]}"
+        },
+        {
+          "field_id": "fldeKrcSQf",
+          "field_value": ""
+        },
+        {
+          "field_id": "fldPo0pMbo",
+          "field_value": "optOjPulcs"
+        },
+        {
+          "field_id": "fldfDAcv8G",
+          "field_value": "optRFESg6J"
+        },
+        {
+          "field_id": "fldAzRRxJy",
+          "field_value": "optpTvmvlI"
+        },
+        {
+          "field_id": "fld2ou8xAf",
+          "field_value": "[{\"text\":\"5月20日红色宝马ZE8746过户\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldHC6DQiA",
+          "field_value": "1783008000000"
+        },
+        {
+          "field_id": "fldzMMy9bq",
+          "field_value": ""
+        }
+      ],
+      "record_id": "recvooKU5VtbEI"
+    },
+    {
+      "action": "record_edited",
+      "after_value": [
+        {
+          "field_id": "fldPo0pMbo",
+          "field_value": "optOjPulcs"
+        },
+        {
+          "field_id": "fldfDAcv8G",
+          "field_value": "optRFESg6J"
+        },
+        {
+          "field_id": "fld2ou8xAf",
+          "field_value": "[{\"text\":\"5月20日红色宝马ZE8746过户\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldyeYnmkI",
+          "field_value": "[{\"text\":\"红色宝马ZE8746车辆尾款\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldlgSkkHU",
+          "field_identity_value": {
+            "users": [
+              {
+                "avatar_url": "https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp",
+                "en_name": "华星助手",
+                "name": "华星助手",
+                "user_id": {
+                  "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+                  "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+                  "user_id": null
+                }
+              }
+            ]
+          },
+          "field_value": "{\"users\":[{\"name\":\"华星助手\",\"userId\":\"7657381089484295134\",\"avatarUrl\":\"https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp\",\"enName\":\"华星助手\"}]}"
+        },
+        {
+          "field_id": "fldzMMy9bq",
+          "field_value": ""
+        },
+        {
+          "field_id": "fldAxAEJ5m",
+          "field_value": "optb4okQvH"
+        },
+        {
+          "field_id": "fldHC6DQiA",
+          "field_value": "1783008000000"
+        },
+        {
+          "field_id": "fldUI4XEPA",
+          "field_value": "1783160302000"
+        },
+        {
+          "field_id": "fldiQU6IVm",
+          "field_value": "25242"
+        },
+        {
+          "field_id": "fldkXvF7uD",
+          "field_value": "1783160302000"
+        },
+        {
+          "field_id": "fldhskX4P7",
+          "field_identity_value": {
+            "users": [
+              {
+                "avatar_url": "https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp",
+                "en_name": "华星助手",
+                "name": "华星助手",
+                "user_id": {
+                  "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+                  "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+                  "user_id": null
+                }
+              }
+            ]
+          },
+          "field_value": "{\"users\":[{\"enName\":\"华星助手\",\"name\":\"华星助手\",\"userId\":\"7657381089484295134\",\"avatarUrl\":\"https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp\"}]}"
+        },
+        {
+          "field_id": "fldAzRRxJy",
+          "field_value": "optpTvmvlI"
+        },
+        {
+          "field_id": "fldeKrcSQf",
+          "field_value": ""
+        },
+        {
+          "field_id": "fldy4hw5aY",
+          "field_value": ""
+        },
+        {
+          "field_id": "fldk1paiIH",
+          "field_value": "[{\"text\":\"黄永清\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldwMo1lq5",
+          "field_value": "[{\"text\":\"車輛總價+車輛雜費已結清\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fld2RXmcgZ",
+          "field_value": "[{\"sequence\":\"18\",\"number\":\"18\"}]"
+        }
+      ],
+      "before_value": [
+        {
+          "field_id": "fldeKrcSQf",
+          "field_value": ""
+        },
+        {
+          "field_id": "fld2ou8xAf",
+          "field_value": "[{\"text\":\"5月20日红色宝马ZE8746过户\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldPo0pMbo",
+          "field_value": "optOjPulcs"
+        },
+        {
+          "field_id": "fldk1paiIH",
+          "field_value": "[{\"text\":\"黄永清\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldiQU6IVm",
+          "field_value": "25242"
+        },
+        {
+          "field_id": "fldzMMy9bq",
+          "field_value": ""
+        },
+        {
+          "field_id": "fldhskX4P7",
+          "field_identity_value": {
+            "users": [
+              {
+                "avatar_url": "https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp",
+                "en_name": "华星助手",
+                "name": "华星助手",
+                "user_id": {
+                  "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+                  "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+                  "user_id": null
+                }
+              }
+            ]
+          },
+          "field_value": "{\"users\":[{\"enName\":\"华星助手\",\"name\":\"华星助手\",\"userId\":\"7657381089484295134\",\"avatarUrl\":\"https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp\"}]}"
+        },
+        {
+          "field_id": "fldAzRRxJy",
+          "field_value": "optpTvmvlI"
+        },
+        {
+          "field_id": "fldUI4XEPA",
+          "field_value": "1783160302000"
+        },
+        {
+          "field_id": "fldkXvF7uD",
+          "field_value": "1783160302000"
+        },
+        {
+          "field_id": "fldlgSkkHU",
+          "field_identity_value": {
+            "users": [
+              {
+                "avatar_url": "https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp",
+                "en_name": "华星助手",
+                "name": "华星助手",
+                "user_id": {
+                  "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+                  "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+                  "user_id": null
+                }
+              }
+            ]
+          },
+          "field_value": "{\"users\":[{\"name\":\"华星助手\",\"userId\":\"7657381089484295134\",\"avatarUrl\":\"https://s3-imfile.feishucdn.com/static-resource/v1/v3_00136_1897f239-fa5f-4ed2-9971-f0619482f8fg~?image_size=72x72&cut_type=default-face&quality=&format=jpeg&sticker_format=.webp\",\"enName\":\"华星助手\"}]}"
+        },
+        {
+          "field_id": "fldHC6DQiA",
+          "field_value": "1783008000000"
+        },
+        {
+          "field_id": "fldwMo1lq5",
+          "field_value": "[{\"text\":\"車輛總價+車輛雜費已結清\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldfDAcv8G",
+          "field_value": "optRFESg6J"
+        },
+        {
+          "field_id": "fldAxAEJ5m",
+          "field_value": "optb4okQvH"
+        },
+        {
+          "field_id": "fldyeYnmkI",
+          "field_value": "[{\"text\":\"红色宝马ZE8746车辆尾款\",\"type\":\"text\"}]"
+        },
+        {
+          "field_id": "fldy4hw5aY",
+          "field_value": ""
+        },
+        {
+          "field_id": "fld2RXmcgZ",
+          "field_value": "[{\"sequence\":\"18\",\"number\":\"18\"}]"
+        }
+      ],
+      "record_id": "recvooKU5VtbEI"
+    }
+  ],
+  "file_token": "YyIrb6vDNaVK9osgqVvcp7bInKc",
+  "file_type": "bitable",
+  "operator_id": {
+    "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+    "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+    "user_id": null
+  },
+  "revision": 49,
+  "subscriber_id_list": [
+    {
+      "open_id": "ou_a98b70204bbcf2554bc14cf62d0ad8cf",
+      "union_id": "on_4b5d5abd7376dc94317f3b8329155e7a",
+      "user_id": null
+    }
+  ],
+  "table_id": "tblcpgATAP04MyPV",
+  "update_time": 1783160302
+}
