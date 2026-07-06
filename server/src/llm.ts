@@ -116,7 +116,7 @@ const VALID_METHOD_KEYS = new Set(PAYMENT_METHOD_KEYS)
 
 const SET_REMINDER_TOOL = {
   name: 'set_reminder',
-  description: '为用户设置一条定时提醒。到点会在群里@用户并回复原消息。当用户说"X分钟后提醒我...""下午X点提醒我..."等时调用。remind_at 必须是未来的时间。',
+  description: '为用户设置一条单次短时提醒(到点在群里@用户并回复原消息)。仅用于明确"只提醒一次"的短时场景,如"5分钟后提醒我""下午3点提醒我开会""1小时后叫我"。待办类事项(回访/登记/跟进/处理/完成XX等)用 create_todo,不要用本工具。remind_at 必须是未来的时间。',
   input_schema: {
     type: 'object' as const,
     properties: {
@@ -154,7 +154,7 @@ const GET_WEATHER_TOOL = {
 
 const CREATE_TODO_TOOL = {
   name: 'create_todo',
-  description: '在飞书待办事项表创建待办并排渐进式提醒(3轮:起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒)。用户 @你 + 待办内容 + wiki 链接时调用。多对象(如"回访客户A、B、C")拆成 contents 数组一次调用。',
+  description: '在飞书待办事项表创建待办并排渐进式提醒(3轮:起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒)。用户 @你 提到待办事项(回访/登记/跟进/处理/完成/报销等)时调用,无需 wiki 链接(后端有默认待办表)。这是"提醒我XX事项"的默认处理方式。多对象(如"回访客户A、B、C")拆成 contents 数组一次调用。',
   input_schema: {
     type: 'object' as const,
     properties: {
@@ -631,7 +631,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   const system = `你是一个有帮助又活泼的群助手。当前时间:${currentTimeStr()}(UTC+8, Asia/Shanghai)。用户在飞书群里@你交流。
 回答风格:像群里熟悉的朋友,语气轻松、自然、偶尔用 emoji 调节气氛,避免机械感和官腔。简短直接,不说废话。
 你能力:
-- 设置定时提醒:用户说"X分钟后/下午X点提醒我..."时,调用 set_reminder 工具,remind_at 传 ISO 8601 绝对时间(如 2026-07-03T13:05:00+08:00)。确认成功后用轻松的话告诉用户几点会提醒、提醒什么,别只回干巴巴的「已设置」。
+- 设置单次短时提醒:仅当用户明确要"只提醒一次"的短时场景(如"5分钟后提醒我""下午3点提醒我开会""1小时后叫我")时,调用 set_reminder,remind_at 传 ISO 8601 绝对时间(如 2026-07-03T13:05:00+08:00)。确认成功后用轻松的话告诉用户几点会提醒、提醒什么。待办类事项(回访/登记/跟进/处理/完成XX等)走 create_todo,不要用 set_reminder。
 - 查询天气:用户问某地天气、要不要带伞、穿什么时,调用 get_weather 工具。可查当前(不传 date)或未来日期(传 date=YYYY-MM-DD,支持约3天预报)。
   · 用户说"今天/现在"→ 不传 date;说"明天/后天/具体日期"→ 根据当前日期换算成 YYYY-MM-DD 传入 date。
   · 拿到结果后用口语转述(别说"温度32湿度55%",要说"32度挺热的,注意防晒 ☀️")。预报给的是最高/最低温,要说"明天 28~35度"。
@@ -652,11 +652,11 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · 不确定客户名写法时先 list_customers 拿准确名(简繁/大小写要对齐),再 query_finance / customer_groups;业务名同样要与已有业务逐字一致。
   · 金额**务必按币种分开报:港币和人民币绝不能加在一起,也不要换算**(工具返回的 income/expense 已按 HKD/RMB 分开)。某币种为 0 就别提它。报金额用主单位+千分位(如"HKD 12,000")。
   · 一般先报汇总(笔数 + 各币种合计);用户追问明细时再 query_finance 带 with_items=true(最多10条)。查无结果要如实说"没有记录",别编。
-- 创建待办:用户 @你 且消息带飞书多维表格/wiki 链接 + 待办/回访/跟进/处理等意图时(如"明天9:30提醒我回访客户A、B、C <链接>""明天提醒我完成报销 <链接>"),调 create_todo。
+- 创建待办:用户 @你 提到待办事项(回访/登记/跟进/处理/完成/报销/整理等,如"明天9:30提醒我回访客户A、B、C""明天提醒我完成报销""提醒我登记客户")时,调 create_todo。**无需 wiki 链接**(后端有默认待办表)。这是"提醒我XX事项"的默认处理方式;只有用户明确说"只提醒一次""X分钟后"等短时单次场景才用 set_reminder。
   · contents = 待办内容数组,去掉链接和时间词。多对象(如"回访客户A、B、C")拆成多项,一次调用传 ["回访客户A","回访客户B","回访客户C"];单条也用数组包 ["整理周报"]。不要为多对象调多次。
   · remind_at = 起点时间 ISO 8601。用户说了具体时间("明天9:30""下午3点"等)就换算传入(第1次提醒=该时间);没说具体时间("明天提醒我XX")就不传(默认次日9:30起)。
   · 后端自动排渐进式3轮提醒(起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒,合并成一条消息列出)。LLM 不用管轮次。
-  · 入库后回复:✅ 已创建 N 条待办 + 列出内容 + 第一次提醒时间(及后续两轮时间)。例:"✅ 已创建3条待办:回访客户A、回访客户B、回访客户C\n⏰ 第一次提醒:明天9:30,之后11:30、14:30各查一次(没完成才提醒)\n🔗 查看待办:<bitable_link>"。bitable_link 为空则省略链接行。`
+  · 入库后后端自动生成回复(✅+内容清单+提醒时间+表格链接),LLM 无需自己组织回复文本。`
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: question },
