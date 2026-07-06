@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { anthropic, modelName } from './ai/model.js'
-import { addReminder } from './db/reminders.js'
+import { addReminder, addBatchReminders } from './db/reminders.js'
 import {
   addTransaction,
   getLatestByUser,
@@ -18,6 +18,7 @@ import { resolveProject, listProjectNames, findProjectIdByName, getProjectName }
 import { PAYMENT_METHODS, PAYMENT_METHOD_KEYS } from './db/paymentMethods.js'
 import { getWeather } from './services/weather.js'
 import { writeTransactionToBitable, updateTransactionInBitable } from './feishu/bitable.js'
+import { createTodoInBitable } from './feishu/bitable-todo.js'
 import { config } from './config.js'
 
 // 当前时间字符串(Asia/Shanghai),注入 system prompt 让 LLM 有时间观念
@@ -52,6 +53,61 @@ function parseDateBound(date: string, startOfDay: boolean): number | null {
   const iso = startOfDay ? `${y}-${mo}-${d}T00:00:00+08:00` : `${y}-${mo}-${d}T23:59:59+08:00`
   const t = Date.parse(iso)
   return isNaN(t) ? null : t
+}
+
+// ts 所在 Asia/Shanghai 日期的 H:M(0-23,0-59)对应的时间戳(毫秒)
+function shanghaiAt(ts: number, hour: number, minute: number): number {
+  const [y, m, d] = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(ts)).split('-').map(Number)
+  return Date.parse(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+08:00`)
+}
+
+// 次日 Asia/Shanghai 的 H:M 时间戳(无具体时间时渐进式提醒的起点,默认次日9:30)
+function nextDayAt(hour: number, minute: number): number {
+  return shanghaiAt(Date.now() + 24 * 3600_000, hour, minute)
+}
+
+// ts 在 Asia/Shanghai 时区的友好描述:相对今天(今天/明天/M月D日)+ HH:MM
+function formatShanghaiRelative(ts: number): string {
+  const [y, m, d] = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(ts)).split('-').map(Number)
+  const time = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date(ts))
+  const [ty, tm, td] = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date()).split('-').map(Number)
+  const today0 = Date.parse(`${ty}-${String(tm).padStart(2, '0')}-${String(td).padStart(2, '0')}T00:00:00+08:00`)
+  const that0 = Date.parse(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T00:00:00+08:00`)
+  const diffDays = Math.round((that0 - today0) / 86400000)
+  if (diffDays === 0) return `今天 ${time}`
+  if (diffDays === 1) return `明天 ${time}`
+  return `${m}月${d}日 ${time}`
+}
+
+// create_todo 成功后后端直接拼回复(绕过 LLM):链接必带 + 语气俏皮 + 随机开头避免死板
+const TODO_REPLY_OPENERS = ['好嘞～已帮你建', '安排上!已建', '收到～已帮你建', '没问题,已入库']
+function buildTodoReply(
+  items: string[],
+  rounds: { round: number; remindAt: number }[],
+  link: string,
+): string {
+  const opener = TODO_REPLY_OPENERS[Math.floor(Math.random() * TODO_REPLY_OPENERS.length)]
+  const lines: string[] = [`✅ ${opener} ${items.length} 条待办:`]
+  for (const c of items) lines.push(`- ${c}`)
+  const first = formatShanghaiRelative(rounds[0].remindAt)
+  const later = rounds.slice(1).map((r) =>
+    new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(r.remindAt)),
+  )
+  if (rounds.length === 1) {
+    lines.push(`⏰ ${first} 提醒你一次(当晚 8 点前没法再排更多轮啦)`)
+  } else {
+    lines.push(`⏰ ${first} 第一轮,之后 ${later.join('、')} 各查一次(没完成才再叨扰你哈)`)
+  }
+  if (link) lines.push(`🔗 查看待办:${link}`)
+  return lines.join('\n')
 }
 
 // 我方收款方式提示串(供 system prompt 告诉 LLM 可选 key)
@@ -93,6 +149,26 @@ const GET_WEATHER_TOOL = {
       },
     },
     required: ['city'],
+  },
+}
+
+const CREATE_TODO_TOOL = {
+  name: 'create_todo',
+  description: '在飞书待办事项表创建待办并排渐进式提醒(3轮:起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒)。用户 @你 + 待办内容 + wiki 链接时调用。多对象(如"回访客户A、B、C")拆成 contents 数组一次调用。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      contents: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '待办内容数组。单条也用数组包,如["回访客户A"];多对象每项一条,如["回访客户A","回访客户B","回访客户C"]。去掉链接和时间词。',
+      },
+      remind_at: {
+        type: 'string',
+        description: '可选。起点时间 ISO 8601,如 "2026-07-07T09:30:00+08:00"。有具体时间传它(第1次提醒=该时间);没具体时间不传(默认次日9:30起)。后端自动排 +2h、+3h 两轮,晚8点前截止,每轮未完成才提醒。',
+      },
+    },
+    required: ['contents'],
   },
 }
 
@@ -256,6 +332,64 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
     // 通知调度器:可能有更早的提醒需要重排定时器(由 reminders.ts 注入,避免循环依赖)
     onReminderAdded?.()
     return JSON.stringify({ ok: true, remind_at, content })
+  }
+  if (name === 'create_todo') {
+    const { contents, remind_at } = input as { contents: string[]; remind_at?: string }
+    // 去重 + 去空
+    const items = Array.from(new Set((contents || []).map((s) => s.trim()).filter(Boolean)))
+    if (!items.length) return JSON.stringify({ ok: false, error: '待办内容(contents)不能为空' })
+
+    // 起点:有 remind_at 用它(校验未来);没传 = 次日 9:30 Asia/Shanghai
+    let startTs: number
+    if (remind_at) {
+      startTs = Date.parse(remind_at)
+      if (isNaN(startTs)) return JSON.stringify({ ok: false, error: '提醒时间格式无法解析' })
+      if (startTs <= Date.now()) return JSON.stringify({ ok: false, error: '提醒时间已过去,请给一个未来的时间' })
+    } else {
+      startTs = nextDayAt(9, 30)
+    }
+
+    // 逐条写表格,收集成功的 record_id
+    const recordIds: string[] = []
+    for (const c of items) {
+      const rid = await createTodoInBitable({ content: c, userOpenId: ctx.userOpenId })
+      if (rid) recordIds.push(rid)
+    }
+    if (!recordIds.length) return JSON.stringify({ ok: false, error: '待办表格写入全部失败' })
+
+    // 算 3 轮 + 截止(起点当天 20:00 Asia/Shanghai,超过则不排)
+    const day20 = shanghaiAt(startTs, 20, 0)
+    const rounds: { round: number; remindAt: number }[] = [{ round: 1, remindAt: startTs }]
+    const r2 = startTs + 2 * 3600_000
+    const r3 = startTs + 3 * 3600_000
+    if (r2 <= day20) rounds.push({ round: 2, remindAt: r2 })
+    if (r3 <= day20) rounds.push({ round: 3, remindAt: r3 })
+
+    const batchId = `${ctx.originalMessageId}-${Date.now()}`
+    addBatchReminders({
+      batchId,
+      chatId: ctx.chatId,
+      userOpenId: ctx.userOpenId,
+      originalMessageId: ctx.originalMessageId,
+      todoRecordIds: recordIds,
+      rounds,
+    })
+    onReminderAdded?.()
+
+    const roundStr = rounds
+      .map((r) => new Date(r.remindAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }))
+      .join('、')
+    console.log(`📋 已创建待办 batch=${batchId} 条数=${recordIds.length} 轮次=${rounds.length} 起点=${new Date(startTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`)
+    return JSON.stringify({
+      ok: true,
+      todo_count: recordIds.length,
+      contents: items,
+      start_at: new Date(startTs).toISOString(),
+      rounds: rounds.map((r) => ({ round: r.round, at: new Date(r.remindAt).toISOString() })),
+      rounds_time_str: roundStr,
+      bitable_link: config.BITABLE_TODO_LINK,
+      __reply: buildTodoReply(items, rounds, config.BITABLE_TODO_LINK),
+    })
   }
   if (name === 'get_weather') {
     const { city, date } = input as { city: string; date?: string }
@@ -517,7 +651,12 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
 - 查询收支:用户问"现在有几笔收款/各多少""X客户总共收了多少""X做了几个业务(群)""待结清多少""某月收款多少"等时,调用查询工具,别凭空编数字。
   · 不确定客户名写法时先 list_customers 拿准确名(简繁/大小写要对齐),再 query_finance / customer_groups;业务名同样要与已有业务逐字一致。
   · 金额**务必按币种分开报:港币和人民币绝不能加在一起,也不要换算**(工具返回的 income/expense 已按 HKD/RMB 分开)。某币种为 0 就别提它。报金额用主单位+千分位(如"HKD 12,000")。
-  · 一般先报汇总(笔数 + 各币种合计);用户追问明细时再 query_finance 带 with_items=true(最多10条)。查无结果要如实说"没有记录",别编。`
+  · 一般先报汇总(笔数 + 各币种合计);用户追问明细时再 query_finance 带 with_items=true(最多10条)。查无结果要如实说"没有记录",别编。
+- 创建待办:用户 @你 且消息带飞书多维表格/wiki 链接 + 待办/回访/跟进/处理等意图时(如"明天9:30提醒我回访客户A、B、C <链接>""明天提醒我完成报销 <链接>"),调 create_todo。
+  · contents = 待办内容数组,去掉链接和时间词。多对象(如"回访客户A、B、C")拆成多项,一次调用传 ["回访客户A","回访客户B","回访客户C"];单条也用数组包 ["整理周报"]。不要为多对象调多次。
+  · remind_at = 起点时间 ISO 8601。用户说了具体时间("明天9:30""下午3点"等)就换算传入(第1次提醒=该时间);没说具体时间("明天提醒我XX")就不传(默认次日9:30起)。
+  · 后端自动排渐进式3轮提醒(起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒,合并成一条消息列出)。LLM 不用管轮次。
+  · 入库后回复:✅ 已创建 N 条待办 + 列出内容 + 第一次提醒时间(及后续两轮时间)。例:"✅ 已创建3条待办:回访客户A、回访客户B、回访客户C\n⏰ 第一次提醒:明天9:30,之后11:30、14:30各查一次(没完成才提醒)\n🔗 查看待办:<bitable_link>"。bitable_link 为空则省略链接行。`
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: question },
@@ -531,6 +670,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
       tools: [
         SET_REMINDER_TOOL,
         GET_WEATHER_TOOL,
+        CREATE_TODO_TOOL,
         RECORD_INCOME_TOOL,
         RECORD_EXPENSE_TOOL,
         CORRECT_TRANSACTION_TOOL,
@@ -556,6 +696,11 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
       for (const tu of toolUses) {
         const result = await executeTool(tu.name, tu.input, ctx)
         toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: result })
+        // create_todo 成功后后端已拼好回复(__reply),直接返回绕过 LLM 最终生成,保证链接必带 + 语气稳定俏皮
+        try {
+          const parsed = JSON.parse(result)
+          if (parsed && typeof parsed.__reply === 'string') return parsed.__reply
+        } catch {}
       }
       messages.push({ role: 'user', content: toolResults })
       continue

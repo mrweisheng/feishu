@@ -50,11 +50,14 @@ CREATE TABLE IF NOT EXISTS reminders (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id             TEXT NOT NULL,                  -- 群ID(便于排查)
   user_open_id        TEXT NOT NULL,                  -- @谁
-  content             TEXT NOT NULL,                  -- 提醒内容
+  content             TEXT NOT NULL,                  -- 提醒内容(渐进式批次存空,到点动态聚合)
   remind_at           INTEGER NOT NULL,               -- 触发时间(毫秒)
   original_message_id TEXT NOT NULL,                  -- 设提醒的原消息ID,到点reply它
   created_at          INTEGER NOT NULL,
-  status              TEXT NOT NULL DEFAULT 'pending' -- pending | sent | expired
+  status              TEXT NOT NULL DEFAULT 'pending',-- pending | sent | expired
+  batch_id            TEXT NOT NULL DEFAULT '',       -- 渐进式批次ID(set_reminder 单次提醒留空)
+  round               INTEGER NOT NULL DEFAULT 0,     -- 第几轮 1/2/3(单次=0)
+  todo_record_ids     TEXT NOT NULL DEFAULT ''        -- JSON数组:该批次待办的飞表 record_id
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(remind_at, status);
 
@@ -120,3 +123,9 @@ function addColumnIfMissing(table: string, column: string, ddl: string): void {
 addColumnIfMissing('transactions', 'feishu_record_id', "feishu_record_id TEXT NOT NULL DEFAULT ''")
 addColumnIfMissing('transactions', 'counterparty_account_type', "counterparty_account_type TEXT NOT NULL DEFAULT ''")
 addColumnIfMissing('transactions', 'is_deleted', 'is_deleted INTEGER NOT NULL DEFAULT 0')
+addColumnIfMissing('reminders', 'batch_id', "batch_id TEXT NOT NULL DEFAULT ''")
+addColumnIfMissing('reminders', 'round', 'round INTEGER NOT NULL DEFAULT 0')
+addColumnIfMissing('reminders', 'todo_record_ids', "todo_record_ids TEXT NOT NULL DEFAULT ''")
+
+// idx_reminders_batch 引用 batch_id 列,必须在上面迁移补列之后建(旧库 reminders 表已存在但无该列,放建表 exec 块里会 no such column)
+db.exec('CREATE INDEX IF NOT EXISTS idx_reminders_batch ON reminders(batch_id, round)')

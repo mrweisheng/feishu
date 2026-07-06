@@ -22,4 +22,9 @@ export const config = {
   BITABLE_TABLE_ID: process.env.BITABLE_TABLE_ID || '',
   // 多维表格链接(录入后回复里附上,便于点击查看)
   BITABLE_LINK: process.env.BITABLE_LINK || '',
+  // 待办事项多维表格(可选:留空则跳过表格写入,只设提醒)。wiki node token 可直接当 app_token 用
+  BITABLE_TODO_APP_TOKEN: process.env.BITABLE_TODO_APP_TOKEN || '',
+  BITABLE_TODO_TABLE_ID: process.env.BITABLE_TODO_TABLE_ID || '',
+  // 待办表格链接(创建后回复里附上,便于点击查看)
+  BITABLE_TODO_LINK: process.env.BITABLE_TODO_LINK || '',
 }

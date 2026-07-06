@@ -3,10 +3,14 @@ import {
   getEarliestPendingReminder,
   markReminderSent,
   expireOverdueReminders,
+  cancelLaterRounds,
+  getBatchMaxRound,
+  type DueReminder,
 } from '../db/reminders.js'
 import { replyMessage } from './messages.js'
 import { generateReminderText, setOnReminderAdded } from '../llm.js'
 import { getUserName } from './handler.js'
+import { getTodoRecords } from './bitable-todo.js'
 
 // 主调度精度:为「最近一条提醒」设动态 setTimeout,到点精确触发,中间零空转。
 // 兜底轮询间隔:每 10 分钟慢扫一次,防止动态定时器因误差/新增提醒错过。
@@ -28,17 +32,53 @@ async function sendReminder(r: {
   console.log('⏰ 已发送提醒 id=', r.id, '内容:', r.content)
 }
 
+// 渐进式批次提醒:到点读表格状态,把仍"待处理"的待办合并成一条消息列出(不 @十几次)
+async function sendBatchReminder(r: DueReminder): Promise<void> {
+  let recordIds: string[] = []
+  try {
+    recordIds = JSON.parse(r.todo_record_ids || '[]')
+  } catch {
+    recordIds = []
+  }
+  const records = await getTodoRecords(recordIds)
+  if (records.length === 0) {
+    // 读取全部失败(网络/权限):放弃本轮,不取消后续(下一轮还会再试)
+    console.warn(`📋 批次 ${r.batch_id} round=${r.round} 读取表格全部失败,放弃本轮`)
+    return
+  }
+  const pending = records.filter((x) => x.status === '待处理')
+  if (pending.length === 0) {
+    // 全完成/取消:不发,取消后续轮次(避免空跑)
+    const cancelled = cancelLaterRounds(r.batch_id, r.round)
+    console.log(`📋 批次 ${r.batch_id} round=${r.round} 全完成,取消后续 ${cancelled} 轮`)
+    return
+  }
+  const userName = (await getUserName(r.user_open_id).catch(() => '')) || '你'
+  const maxRound = getBatchMaxRound(r.batch_id)
+  const isLast = r.round >= maxRound
+  const list = pending.map((x, i) => `${i + 1}. ${x.content}`).join('\n')
+  const head = isLast
+    ? `⏰ ${userName},最后提醒!你还有 ${pending.length} 件待办:\n`
+    : `📋 ${userName},你还有 ${pending.length} 件待办:\n`
+  await replyMessage(r.original_message_id, `<at user_id="${r.user_open_id}"></at> ${head}${list}`)
+  console.log(`📋 已发送批次提醒 id=${r.id} batch=${r.batch_id} round=${r.round} 待办=${pending.length} 最后轮=${isLast}`)
+}
+
 // 把所有「已到点」的 pending 提醒一次性发出去
 async function flushDue(): Promise<void> {
   const due = getDueReminders(Date.now())
   await Promise.all(
     due.map(async (r) => {
       try {
-        await sendReminder(r)
+        if (r.batch_id) {
+          await sendBatchReminder(r)
+        } else {
+          await sendReminder(r)
+        }
       } catch (err: any) {
         console.error('【提醒发送失败】id=', r.id, 'msg:', err.response?.data?.msg || err.message)
       } finally {
-        // 无论成败都标记 sent:原消息被撤回等情况会导致 reply 永久失败,避免无限重试打扰
+        // 无论成败都标记 sent:原消息被撤回/表格读取失败等情况会永久失败,避免无限重试打扰
         markReminderSent(r.id)
       }
     }),
