@@ -9,8 +9,16 @@ import { startFeishuWorker } from './feishu/handler.js'
 
 const app = new Hono()
 
-// 允许前端跨域访问(开发期;生产可收紧来源)
-app.use('*', cors())
+// CORS:仅当配置了 CORS_ORIGINS 白名单才放行对应来源;留空则不挂中间件
+// (浏览器默认同源策略,跨域被拒)。避免无差别 cors() 放行任意来源,
+// 防止 ?limit=-1 等接口被任意网页拉取全库。
+if (config.CORS_ORIGINS) {
+  const origins = new Set(config.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean))
+  app.use('*', cors({
+    origin: (origin) => (origin && origins.has(origin) ? origin : null),
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
+  }))
+}
 
 // 1. 业务 API(读 SQLite)
 app.route('/api', apiRoutes)

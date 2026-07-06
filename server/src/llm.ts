@@ -119,7 +119,7 @@ const VALID_METHOD_KEYS = new Set(PAYMENT_METHOD_KEYS)
 
 const SET_REMINDER_TOOL = {
   name: 'set_reminder',
-  description: '为用户设置一条单次短时提醒(到点在群里@用户并回复原消息)。仅用于明确"只提醒一次"的短时场景,如"5分钟后提醒我""下午3点提醒我开会""1小时后叫我"。待办类事项(回访/登记/跟进/处理/完成XX等)用 create_todo,不要用本工具。remind_at 必须是未来的时间。',
+  description: '设置一条单次提醒(到点@用户一次,不入表格,无需"完成")。用于不需要持续跟进、到点通知一声就完的事:喝水、拿快递、吃药、下午3点开会、1小时后叫我、5分钟后提醒我打电话。如果这件事需要"办完才算数、没办完要反复提醒"(如回访客户、报销、登记、对账、拜访),用 create_todo,不要用本工具。remind_at 必须是未来的时间。',
   input_schema: {
     type: 'object' as const,
     properties: {
@@ -157,7 +157,7 @@ const GET_WEATHER_TOOL = {
 
 const CREATE_TODO_TOOL = {
   name: 'create_todo',
-  description: '在飞书待办事项表创建待办并排渐进式提醒(3轮:起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒)。用户 @你 提到待办事项(回访/登记/跟进/处理/完成/报销等)时调用,无需 wiki 链接(后端有默认待办表)。这是"提醒我XX事项"的默认处理方式。多对象(如"回访客户A、B、C")拆成 contents 数组一次调用。',
+  description: '在飞书待办表创建待办并排渐进式提醒(3轮:起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒)。用于需要"持续跟进直到完成"的事——有完成状态、没办完会惦记、值得反复提醒:回访客户、登记、跟进、报销、对账、拜访、催款、提交材料等,不限动词。喝水/拿快递/下午开会这类到点通知一声就完、不存在"办完"的事用 set_reminder。多对象(如"回访客户A、B、C")拆成 contents 数组一次调用。',
   input_schema: {
     type: 'object' as const,
     properties: {
@@ -356,13 +356,19 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       startTs = nextDayAt(9, 30)
     }
 
-    // 逐条写表格,收集成功的 record_id
+    // 待办表格是否启用:未配则走纯提醒模式(不写表格,只设渐进式提醒),与 config「留空则只设提醒」承诺一致
+    const todoBitableEnabled = !!(config.BITABLE_TODO_APP_TOKEN && config.BITABLE_TODO_TABLE_ID)
     const recordIds: string[] = []
-    for (const c of items) {
-      const rid = await createTodoInBitable({ content: c, userOpenId: ctx.userOpenId })
-      if (rid) recordIds.push(rid)
+    const successItems: string[] = []
+    if (todoBitableEnabled) {
+      for (const c of items) {
+        const rid = await createTodoInBitable({ content: c, userOpenId: ctx.userOpenId })
+        if (rid) { recordIds.push(rid); successItems.push(c) }
+      }
+      if (!recordIds.length) return JSON.stringify({ ok: false, error: '待办表格写入全部失败' })
+    } else {
+      successItems.push(...items)
     }
-    if (!recordIds.length) return JSON.stringify({ ok: false, error: '待办表格写入全部失败' })
 
     // 算 3 轮 + 截止(起点当天 20:00 Asia/Shanghai,超过则不排)
     const day20 = shanghaiAt(startTs, 20, 0)
@@ -379,6 +385,7 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       userOpenId: ctx.userOpenId,
       originalMessageId: ctx.originalMessageId,
       todoRecordIds: recordIds,
+      contents: todoBitableEnabled ? undefined : successItems,
       rounds,
     })
     onReminderAdded?.()
@@ -386,16 +393,16 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
     const roundStr = rounds
       .map((r) => new Date(r.remindAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }))
       .join('、')
-    console.log(`📋 已创建待办 batch=${batchId} 条数=${recordIds.length} 轮次=${rounds.length} 起点=${new Date(startTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`)
+    console.log(`📋 已创建待办 batch=${batchId} 条数=${successItems.length}(${todoBitableEnabled ? '表格' : '纯提醒'}) 轮次=${rounds.length} 起点=${new Date(startTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`)
     return JSON.stringify({
       ok: true,
-      todo_count: recordIds.length,
-      contents: items,
+      todo_count: successItems.length,
+      contents: successItems,
       start_at: new Date(startTs).toISOString(),
       rounds: rounds.map((r) => ({ round: r.round, at: new Date(r.remindAt).toISOString() })),
       rounds_time_str: roundStr,
       bitable_link: config.BITABLE_TODO_LINK,
-      __reply: buildTodoReply(items, rounds, config.BITABLE_TODO_LINK),
+      __reply: buildTodoReply(successItems, rounds, config.BITABLE_TODO_LINK),
     })
   }
   if (name === 'get_weather') {
@@ -548,7 +555,8 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       newProjectName = p.name
     }
     if (typeof inp.amount === 'number' && inp.amount > 0) patch.amountMinor = Math.round(inp.amount * 100)
-    if (inp.currency) patch.currency = inp.currency
+    // 币种必须 HKD/RMB:非法值会让 financeSummary 静默漏算、反向同步跳过(与 record_income/expense 校验一致)
+    if (inp.currency === 'HKD' || inp.currency === 'RMB') patch.currency = inp.currency
     if (inp.settlement_status) patch.settlementStatus = inp.settlement_status === 'settled' ? 'settled' : 'pending'
     if (inp.settlement_note !== undefined) patch.settlementNote = inp.settlement_note
     if (inp.kind !== undefined) patch.kind = inp.kind
@@ -673,11 +681,17 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
 
   const system = `你是一个有帮助又活泼的群助手。当前时间:${currentTimeStr()}(UTC+8, Asia/Shanghai)。用户在飞书群里@你交流。
 回答风格:像群里熟悉的朋友,语气轻松、自然、偶尔用 emoji 调节气氛,避免机械感和官腔。简短直接,不说废话。
+⚠️【绝对禁止编造链接】回复里出现的任何 URL/链接,必须原样照抄工具返回结果里的 bitable_link 字段;该字段为空或不存在时,完全不提链接(不要编一个看起来像的网址)。违反这条 = 给用户错误入口,是严重 bug。
 【回复消息 = 上下文】当问题里出现【被回复的消息】标记时:那是用户回复某条消息并@你后,系统读到的"被回复消息"原文,作为这次对话的上下文。
 - 用户没额外打字 → 就是要你处理这条被回复的消息本身:是收款/转出记录 → 按它录入(补录);是查天气/查账等问题 → 回答;不像任何有效请求 → 自然回一句(如"这条没啥要记的呀"),不要硬录。
 - 用户额外打了字 → 以用户本次说的话为主,被回复消息作参考。
 你能力:
-- 设置单次短时提醒:仅当用户明确要"只提醒一次"的短时场景(如"5分钟后提醒我""下午3点提醒我开会""1小时后叫我")时,调用 set_reminder,remind_at 传 ISO 8601 绝对时间(如 2026-07-03T13:05:00+08:00)。确认成功后用轻松的话告诉用户几点会提醒、提醒什么。待办类事项(回访/登记/跟进/处理/完成XX等)走 create_todo,不要用 set_reminder。
+- 设置单次提醒(到点通知一次就完,没有"完成状态"):仅当这件事不需要反复跟进直到完成时用 set_reminder。典型场景:喝水、拿快递、出门、吃药、下午3点开会、1小时后叫我、5分钟后提醒我打电话。remind_at 传 ISO 8601 绝对时间(如 2026-07-03T13:05:00+08:00)。确认成功后用轻松的话告诉用户几点会提醒、提醒什么。
+- ⚠️【set_reminder vs create_todo 怎么选】选择依据不是"工作还是个人",也不是靠某些动词判断,而是看一件事的本质:**它需不需要反复跟进、直到真正完成?**
+  · 需要"持续跟进直到完成"的事 → create_todo(建表+渐进式催办)。它有完成状态,没办完会一直惦记,值得反复提醒。例如:回访客户、登记、跟进、完成报销、对账、拜访客户、催款、提交材料、整理归档。无论工作还是个人(如"还信用卡""续签"),只要没办完会惦记,就用 create_todo。
+  · "到点通知一声就完、不存在完没完成"的事 → set_reminder(单次,不入表)。例如:喝水、拿快递、吃药、下午3点开会、1小时后叫我。提醒到了就行,不存在"办完"一说。
+  · 【最高优先级:用户的显式措辞】用户明说"只提醒一次/就提醒一下/5分钟后"→ set_reminder;用户明说"别让我忘了/直到完成/盯着我办完"→ create_todo。措辞信号盖过语义判断。
+  · 不确定时优先用 create_todo(渐进式更不容易漏事);但喝水、拿快递、开会这种明显不需要跟进的,别建待办。
 - 查询天气:用户问某地天气、要不要带伞、穿什么时,调用 get_weather 工具。可查当前(不传 date)或未来日期(传 date=YYYY-MM-DD,支持约3天预报)。
   · 用户说"今天/现在"→ 不传 date;说"明天/后天/具体日期"→ 根据当前日期换算成 YYYY-MM-DD 传入 date。
   · 拿到结果后用口语转述(别说"温度32湿度55%",要说"32度挺热的,注意防晒 ☀️")。预报给的是最高/最低温,要说"明天 28~35度"。
@@ -701,7 +715,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · 不确定客户名写法时先 list_customers 拿准确名(简繁/大小写要对齐),再 query_finance / customer_groups;业务名同样要与已有业务逐字一致。
   · 金额**务必按币种分开报:港币和人民币绝不能加在一起,也不要换算**(工具返回的 income/expense 已按 HKD/RMB 分开)。某币种为 0 就别提它。报金额用主单位+千分位(如"HKD 12,000")。
   · 一般先报汇总(笔数 + 各币种合计);用户追问明细时再 query_finance 带 with_items=true(最多10条)。查无结果要如实说"没有记录",别编。
-- 创建待办:用户 @你 提到待办事项(回访/登记/跟进/处理/完成/报销/整理等,如"明天9:30提醒我回访客户A、B、C""明天提醒我完成报销""提醒我登记客户")时,调 create_todo。**无需 wiki 链接**(后端有默认待办表)。这是"提醒我XX事项"的默认处理方式;只有用户明确说"只提醒一次""X分钟后"等短时单次场景才用 set_reminder。
+- 创建待办(需持续跟进直到完成的事):当用户 @你 提到「没办完会惦记、值得反复催直到完成」的事时,调 create_todo。这类事有"完成状态",不限于特定动词——回访、登记、跟进、报销、对账、拜访、催款、提交、整理、续费、还款……只要这件事存在"办没办成",就归这里。如"明天9:30提醒我回访客户A、B、C""明天提醒我完成报销""提醒我登记客户""下周盯着我把护照续了"。**无需 wiki 链接**(后端有默认待办表)。
   · contents = 待办内容数组,去掉链接和时间词。多对象(如"回访客户A、B、C")拆成多项,一次调用传 ["回访客户A","回访客户B","回访客户C"];单条也用数组包 ["整理周报"]。不要为多对象调多次。
   · remind_at = 起点时间 ISO 8601。用户说了具体时间("明天9:30""下午3点"等)就换算传入(第1次提醒=该时间);没说具体时间("明天提醒我XX")就不传(默认次日9:30起)。
   · 后端自动排渐进式3轮提醒(起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒,合并成一条消息列出)。LLM 不用管轮次。
@@ -710,6 +724,10 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: question },
   ]
+
+  // 记账/纠正已成功、但 LLM 未能生成最终回复时的兜底确认文案
+  // (防"处理超时"误导用户重发 → 绕过去重 → 重复记账)
+  let lastSideEffectReply: string | null = null
 
   for (let i = 0; i < 3; i++) {
     const res = await anthropic.messages.create({
@@ -742,15 +760,25 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
       messages.push({ role: 'assistant', content: res.content })
       // 执行工具并回灌 tool_result
       const toolResults: Anthropic.ToolResultBlockParam[] = []
+      // 本轮某个工具返回的 __reply:等本轮所有工具执行完再返回,避免丢弃同轮已执行工具的副作用(如先 record_income 再 create_todo)
+      let pendingReply: string | null = null
       for (const tu of toolUses) {
         const result = await executeTool(tu.name, tu.input, ctx)
         toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: result })
-        // create_todo 成功后后端已拼好回复(__reply),直接返回绕过 LLM 最终生成,保证链接必带 + 语气稳定俏皮
         try {
           const parsed = JSON.parse(result)
-          if (parsed && typeof parsed.__reply === 'string') return parsed.__reply
+          if (parsed && typeof parsed.__reply === 'string') pendingReply = parsed.__reply
+          // 记账/纠正成功:记一个兜底确认,循环若用尽未让 LLM 生成回复时用(H3)
+          if (parsed?.ok && (tu.name === 'record_income' || tu.name === 'record_expense')) {
+            const dir = parsed.direction === 'income' ? '收款' : '转出'
+            lastSideEffectReply = `✅ 已记${dir} ${parsed.amount} ${parsed.currency}(群:${parsed.project_name})。回复生成超时,请查表格确认${parsed.bitable_link ? ':' + parsed.bitable_link : ''}`
+          } else if (parsed?.ok && tu.name === 'correct_transaction') {
+            lastSideEffectReply = `✅ 已纠正流水(id=${parsed.id},字段:${(parsed.updated_fields || []).join(',')})。回复生成超时。`
+          }
         } catch {}
       }
+      // 本轮所有工具已执行完:若有 __reply 直接返回(不丢弃任何已执行工具的副作用)
+      if (pendingReply) return pendingReply
       messages.push({ role: 'user', content: toolResults })
       continue
     }
@@ -760,11 +788,32 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
     if (!text) {
       console.error('【LLM 警告】返回无 text 内容,stop_reason:', res.stop_reason, '原始 content:', JSON.stringify(res.content))
     }
-    return text
+    return sanitizeReplyLinks(text)
   }
 
-  // 兜底:循环用尽仍未结束
+  // 兜底:循环用尽仍未结束。若最后一轮已成功记账/纠正,用兜底确认代替"处理超时",避免误导重发(H3)
+  if (lastSideEffectReply) return sanitizeReplyLinks(lastSideEffectReply)
   return '（抱歉,处理超时,请重试）'
+}
+
+// 链接白名单清洗:LLM 偶发幻觉假链接(如凭空编 faisco.cn),绝不能发给用户。
+// 只放行已知安全域名(feishu.cn / larksuite);其余 http(s) 链接整行剔除。
+// 凭证图/其他非链接场景不受影响(它们不是 http 开头的纯文本)。
+const SAFE_LINK_HOSTS = ['feishu.cn', 'larksuite.com']
+function sanitizeReplyLinks(text: string): string {
+  if (!text) return text
+  const lines = text.split('\n')
+  const cleaned = lines.filter((line) => {
+    // 含链接的行才需要判断;不含 http(s) 的行(绝大多数)直接保留,零性能影响
+    if (!/https?:\/\//i.test(line)) return true
+    // 该行有链接:只要出现至少一个白名单域名就保留(LLM 照抄工具返回 bitable_link 的情况)
+    return SAFE_LINK_HOSTS.some((h) => line.toLowerCase().includes(h))
+  })
+  // 若整段被掏空(极端:LLM 回了一堆假链接没别的),保留原文但抹掉链接,避免回复空白
+  if (!cleaned.join('').trim()) {
+    return text.replace(/https?:\/\/\S+/gi, '（链接已隐藏）').trim()
+  }
+  return cleaned.join('\n')
 }
 
 // 到点提醒的多样化模板(LLM 失败时兜底,避免重复死板)

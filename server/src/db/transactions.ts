@@ -548,33 +548,29 @@ export function customerGroups(name: string): CustomerGroupsResult {
       expense_rmb_minor: number
       last_at: number | null
     }>
-  const projects: CustomerGroupRow[] = raw.map((r) => {
-    const income_hkd = r.income_hkd_minor / 100
-    const income_rmb = r.income_rmb_minor / 100
-    const expense_hkd = r.expense_hkd_minor / 100
-    const expense_rmb = r.expense_rmb_minor / 100
-    return {
-      project_id: r.project_id,
-      project_name: r.project_name,
-      count: r.count,
-      income_hkd,
-      income_rmb,
-      expense_hkd,
-      expense_rmb,
-      net_hkd: income_hkd - expense_hkd,
-      net_rmb: income_rmb - expense_rmb,
-      last_at: r.last_at,
-    }
-  })
+  const projects: CustomerGroupRow[] = raw.map((r) => ({
+    project_id: r.project_id,
+    project_name: r.project_name,
+    count: r.count,
+    income_hkd: r.income_hkd_minor / 100,
+    income_rmb: r.income_rmb_minor / 100,
+    expense_hkd: r.expense_hkd_minor / 100,
+    expense_rmb: r.expense_rmb_minor / 100,
+    // 整数 minor 相减再单次 /100,避免两次 /100 浮点相减的尾差
+    net_hkd: (r.income_hkd_minor - r.expense_hkd_minor) / 100,
+    net_rmb: (r.income_rmb_minor - r.expense_rmb_minor) / 100,
+    last_at: r.last_at,
+  }))
+  // totals 用整数 minor 累加后单次 /100,与 summaryByDirection/financeSummary/totalsByProject 口径一致(避免 JS 浮点累加尾差)
   const totals: FinanceSummary = {
-    count: projects.reduce((s, p) => s + p.count, 0),
+    count: raw.reduce((s, r) => s + r.count, 0),
     income: {
-      HKD: projects.reduce((s, p) => s + p.income_hkd, 0),
-      RMB: projects.reduce((s, p) => s + p.income_rmb, 0),
+      HKD: raw.reduce((s, r) => s + r.income_hkd_minor, 0) / 100,
+      RMB: raw.reduce((s, r) => s + r.income_rmb_minor, 0) / 100,
     },
     expense: {
-      HKD: projects.reduce((s, p) => s + p.expense_hkd, 0),
-      RMB: projects.reduce((s, p) => s + p.expense_rmb, 0),
+      HKD: raw.reduce((s, r) => s + r.expense_hkd_minor, 0) / 100,
+      RMB: raw.reduce((s, r) => s + r.expense_rmb_minor, 0) / 100,
     },
   }
   return { customer: name, matched: projects.length > 0, group_count: projects.length, projects, totals }
@@ -606,7 +602,8 @@ export function findRecentEcho(rev: {
   direction: TxnDirection; amountMinor: number; currency: string; occurredAt: number
 }): TransactionRow | null {
   return (
-    (recentEchoStmt.get(rev.direction, rev.amountMinor, rev.currency, rev.occurredAt, Date.now() - 60000) as
+    // 10min 窗口:正向写表涉及 ensureOption + 多张凭证图上传,慢路径可能 >60s;窗口太短会漏匹配 → 误当表格手填再插一条(重复入库)
+    (recentEchoStmt.get(rev.direction, rev.amountMinor, rev.currency, rev.occurredAt, Date.now() - 10 * 60 * 1000) as
       | TransactionRow
       | undefined) ?? null
   )

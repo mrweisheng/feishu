@@ -27,4 +27,9 @@ export const config = {
   BITABLE_TODO_TABLE_ID: process.env.BITABLE_TODO_TABLE_ID || '',
   // 待办表格链接(创建后回复里附上,便于点击查看)
   BITABLE_TODO_LINK: process.env.BITABLE_TODO_LINK || '',
+  // CORS 允许来源白名单(逗号分隔,如 "https://a.com,https://b.com")。
+  // 留空 = 不挂 CORS 中间件 = 走浏览器默认同源策略(跨域被拒),比无差别放行 * 更安全。
+  CORS_ORIGINS: process.env.CORS_ORIGINS || '',
+  // 反向同步事件原始 payload 落盘开关(联调用,生产建议留空=关)
+  BITABLE_DEBUG_EVENT: process.env.BITABLE_DEBUG_EVENT === '1',
 }

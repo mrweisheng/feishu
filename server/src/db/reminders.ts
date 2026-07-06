@@ -94,18 +94,23 @@ export interface AddBatchRemindersInput {
   originalMessageId: string
   todoRecordIds: string[]
   rounds: BatchRoundInput[]
+  /** 纯提醒模式(未配待办表格):待办内容数组,到点直接发,不查表格。表格模式不传。 */
+  contents?: string[]
 }
 
-/** 插入一个渐进式批次的多轮提醒(事务)。content 留空,到点动态聚合表格待办。 */
+/** 插入一个渐进式批次的多轮提醒(事务)。
+ * 表格模式:content 留空,到点动态聚合表格待办状态;
+ * 纯提醒模式:content 存待办内容 JSON,到点直接列出。 */
 export function addBatchReminders(input: AddBatchRemindersInput): void {
   const tx = db.transaction((rs: BatchRoundInput[]) => {
     const now = Date.now()
     const idsJson = JSON.stringify(input.todoRecordIds)
+    const contentJson = input.contents?.length ? JSON.stringify(input.contents) : ''
     for (const r of rs) {
       insertBatchReminder.run({
         chat_id: input.chatId,
         user_open_id: input.userOpenId,
-        content: '',
+        content: contentJson,
         remind_at: r.remindAt,
         original_message_id: input.originalMessageId,
         created_at: now,

@@ -424,7 +424,9 @@ export async function subscribeBitable(): Promise<void> {
 
 // 原始事件落盘一份(每次覆盖),便于首次联调排查结构
 const DEBUG_FILE = path.resolve(path.dirname(config.DB_PATH), 'bitable-event-debug.json')
+// 落盘门控:仅联调时设 BITABLE_DEBUG_EVENT=1,生产关掉(避免每次反向事件同步写盘 IO + 业务/用户数据隐私面)
 function dumpRaw(data: unknown): void {
+  if (!config.BITABLE_DEBUG_EVENT) return
   try {
     fs.writeFileSync(DEBUG_FILE, JSON.stringify(data, null, 2))
   } catch {

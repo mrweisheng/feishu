@@ -284,15 +284,18 @@ async function handleIncomingMessage(data: FeishuEvent): Promise<void> {
  */
 export function startFeishuWorker(): void {
   // 异步拉取机器人 open_id(不阻塞启动;未就绪期间收到的 @消息会被跳过)
-  loadBotOpenId().then((id) => { botOpenId = id })
+  loadBotOpenId().then((id) => { botOpenId = id }).catch((e: any) => console.error('【loadBotOpenId 未捕获】', e?.message ?? e))
 
   // 注册消息事件 + 多维表格记录变更事件(反向同步)
+  // 顶层 try/catch:任一未预期异常都兜住,避免 async 回调 reject 冒泡到 SDK、拖垮长连接
   const eventDispatcher = new EventDispatcher({}).register({
     'im.message.receive_v1': async (data: FeishuEvent) => {
-      await handleIncomingMessage(data)
+      try { await handleIncomingMessage(data) }
+      catch (e: any) { console.error('【消息事件处理异常】', e?.stack ?? e?.message ?? e) }
     },
     'drive.file.bitable_record_changed_v1': async (data: FeishuEvent) => {
-      await handleBitableRecordChanged(data)
+      try { await handleBitableRecordChanged(data) }
+      catch (e: any) { console.error('【多维表格事件处理异常】', e?.stack ?? e?.message ?? e) }
     },
   })
 

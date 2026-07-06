@@ -40,6 +40,33 @@ async function sendBatchReminder(r: DueReminder): Promise<void> {
   } catch {
     recordIds = []
   }
+
+  // 纯提醒模式(未配待办表格):无 record_id,直接用存储的待办内容发,不查表格状态
+  if (recordIds.length === 0) {
+    let contents: string[] = []
+    try {
+      const c = JSON.parse(r.content || '[]')
+      if (Array.isArray(c)) contents = c.filter((x) => typeof x === 'string' && x)
+    } catch {
+      contents = []
+    }
+    if (contents.length === 0) {
+      console.warn(`📋 批次 ${r.batch_id} round=${r.round} 无待办内容,放弃本轮`)
+      return
+    }
+    const userName = (await getUserName(r.user_open_id).catch(() => '')) || '你'
+    const maxRound = getBatchMaxRound(r.batch_id)
+    const isLast = r.round >= maxRound
+    const list = contents.map((x, i) => `${i + 1}. ${x}`).join('\n')
+    const head = isLast
+      ? `⏰ ${userName},最后提醒!你还有 ${contents.length} 件待办:\n`
+      : `📋 ${userName},你还有 ${contents.length} 件待办:\n`
+    await replyMessage(r.original_message_id, `<at user_id="${r.user_open_id}"></at> ${head}${list}`)
+    console.log(`📋 已发送批次提醒(纯提醒) id=${r.id} batch=${r.batch_id} round=${r.round} 待办=${contents.length} 最后轮=${isLast}`)
+    return
+  }
+
+  // 表格模式:读表格状态,只提醒仍"待处理"的
   const records = await getTodoRecords(recordIds)
   if (records.length === 0) {
     // 读取全部失败(网络/权限):放弃本轮,不取消后续(下一轮还会再试)
@@ -64,25 +91,34 @@ async function sendBatchReminder(r: DueReminder): Promise<void> {
   console.log(`📋 已发送批次提醒 id=${r.id} batch=${r.batch_id} round=${r.round} 待办=${pending.length} 最后轮=${isLast}`)
 }
 
+// flushDue 互斥:动态定时器与 10min 兜底轮询可能重叠(单次发送窗口 2-6s,批次更久),
+// 不互斥会重复发送同一批 pending 提醒
+let flushing = false
 // 把所有「已到点」的 pending 提醒一次性发出去
 async function flushDue(): Promise<void> {
-  const due = getDueReminders(Date.now())
-  await Promise.all(
-    due.map(async (r) => {
-      try {
-        if (r.batch_id) {
-          await sendBatchReminder(r)
-        } else {
-          await sendReminder(r)
+  if (flushing) return // 已有进行中的 flush:跳过;被跳过的 due 仍是 pending,由 scheduleNext/backstop 补发
+  flushing = true
+  try {
+    const due = getDueReminders(Date.now())
+    await Promise.all(
+      due.map(async (r) => {
+        try {
+          if (r.batch_id) {
+            await sendBatchReminder(r)
+          } else {
+            await sendReminder(r)
+          }
+        } catch (err: any) {
+          console.error('【提醒发送失败】id=', r.id, 'msg:', err.response?.data?.msg || err.message)
+        } finally {
+          // 无论成败都标记 sent:原消息被撤回/表格读取失败等情况会永久失败,避免无限重试打扰
+          markReminderSent(r.id)
         }
-      } catch (err: any) {
-        console.error('【提醒发送失败】id=', r.id, 'msg:', err.response?.data?.msg || err.message)
-      } finally {
-        // 无论成败都标记 sent:原消息被撤回/表格读取失败等情况会永久失败,避免无限重试打扰
-        markReminderSent(r.id)
-      }
-    }),
-  )
+      }),
+    )
+  } finally {
+    flushing = false
+  }
 }
 
 /**

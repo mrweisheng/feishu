@@ -63,7 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(remind_at, status);
 
 -- 我方收款方式(启动时由 db/paymentMethods.ts 幂等 seed)
 CREATE TABLE IF NOT EXISTS payment_methods (
-  key      TEXT PRIMARY KEY,            -- huaxin_hkd | chen_zhenyao_rmb | li_fangliang_hkd | zhao_xindu_alipay | cash
+  key      TEXT PRIMARY KEY,            -- huaxin_hkd | chen_zhenyao_rmb | li_fangliang_hkd | personal_alipay | personal_wechat | cash
   label    TEXT NOT NULL,               -- 显示名
   currency TEXT NOT NULL,               -- HKD | RMB | ANY
   details  TEXT NOT NULL DEFAULT ''     -- 完整户名/账号/行号,前端展示用

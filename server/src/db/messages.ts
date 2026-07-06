@@ -72,40 +72,43 @@ export function saveMessage(data: FeishuEvent, source: 'realtime' | 'history' = 
   const { message, sender } = data
   const now = Date.now()
 
-  const info = insertMessage.run({
-    message_id:      message.message_id,
-    chat_id:         message.chat_id,
-    chat_type:       message.chat_type,
-    message_type:    message.message_type,
-    sender_open_id:  sender?.sender_id?.open_id ?? null,
-    sender_user_id:  sender?.sender_id?.user_id ?? null,
-    sender_union_id: sender?.sender_id?.union_id ?? null,
-    sender_type:     sender?.sender_type ?? null,
-    sender_name:     null, // 异步补,由 handler 拿到名字后回填
-    root_id:         message.root_id ?? null,
-    parent_id:       message.parent_id ?? null,
-    content:         message.content ?? null,
-    raw_data:        JSON.stringify(data),
-    create_time:     Number(message.create_time) || null,
-    received_at:     now,
-    source,
-  })
+  // 事务包裹 message + mentions:崩溃/异常不会留"消息已落、mentions 半落"的半写
+  const tx = db.transaction(() => {
+    const info = insertMessage.run({
+      message_id:      message.message_id,
+      chat_id:         message.chat_id,
+      chat_type:       message.chat_type,
+      message_type:    message.message_type,
+      sender_open_id:  sender?.sender_id?.open_id ?? null,
+      sender_user_id:  sender?.sender_id?.user_id ?? null,
+      sender_union_id: sender?.sender_id?.union_id ?? null,
+      sender_type:     sender?.sender_type ?? null,
+      sender_name:     null, // 异步补,由 handler 拿到名字后回填
+      root_id:         message.root_id ?? null,
+      parent_id:       message.parent_id ?? null,
+      content:         message.content ?? null,
+      raw_data:        JSON.stringify(data),
+      create_time:     Number(message.create_time) || null,
+      received_at:     now,
+      source,
+    })
 
-  // 只有主表真正新增时,才插 mentions(避免旧消息重复插)
-  if (info.changes > 0 && Array.isArray(message.mentions)) {
-    for (const m of message.mentions) {
-      insertMention.run({
-        message_id:  message.message_id,
-        mention_key: m.key ?? null,
-        open_id:     m.id?.open_id ?? null,
-        user_id:     m.id?.user_id ?? null,
-        union_id:    m.id?.union_id ?? null,
-        name:        m.name ?? null,
-      })
+    // 只有主表真正新增时,才插 mentions(避免旧消息重复插)
+    if (info.changes > 0 && Array.isArray(message.mentions)) {
+      for (const m of message.mentions) {
+        insertMention.run({
+          message_id:  message.message_id,
+          mention_key: m.key ?? null,
+          open_id:     m.id?.open_id ?? null,
+          user_id:     m.id?.user_id ?? null,
+          union_id:    m.id?.union_id ?? null,
+          name:        m.name ?? null,
+        })
+      }
     }
-  }
-
-  return info.changes > 0
+    return info.changes > 0
+  })
+  return tx()
 }
 
 // 回填发送人姓名(拿到名字后调用)
