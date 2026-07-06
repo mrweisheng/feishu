@@ -113,6 +113,26 @@ export function fillSenderName(messageId: string, name: string): void {
   updateSenderName.run(name, messageId)
 }
 
+const byIdRow = db.prepare(
+  `SELECT message_id, chat_id, chat_type, message_type, content, sender_open_id, create_time
+   FROM messages WHERE message_id = ?`
+)
+
+export interface StoredMessage {
+  message_id: string
+  chat_id: string | null
+  chat_type: string | null
+  message_type: string | null
+  content: string | null
+  sender_open_id: string | null
+  create_time: number | null
+}
+
+/** 按 message_id 取单条已归档消息原文(补录场景:读"被回复消息"内容)。无则 null。 */
+export function getMessageById(messageId: string): StoredMessage | null {
+  return (byIdRow.get(messageId) as StoredMessage | undefined) ?? null
+}
+
 // 列表查询:可选按 chat_id 过滤,统一走预编译语句
 export function queryMessages({ chatId, limit, offset }: QueryMessagesParams): MessageRow[] {
   return (

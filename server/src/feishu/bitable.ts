@@ -1,5 +1,6 @@
 import path from 'node:path'
 import fs from 'node:fs'
+import type { Readable } from 'node:stream'
 import { apiClient } from './client.js'
 import { config } from '../config.js'
 import {
@@ -12,6 +13,8 @@ import {
   getTxnByFeishuRecordId,
   softDeleteByFeishuRecordId,
   findRecentEcho,
+  packImages,
+  unpackImages,
 } from '../db/transactions.js'
 import { PAYMENT_METHODS } from '../db/paymentMethods.js'
 import { resolveProject, getProjectName } from '../db/projects.js'
@@ -34,6 +37,7 @@ const F = {
   expenseDetail: '转出账户详情',
   expenseObj: '转出对象',
   kind: '款项说明',
+  voucher: '凭证',
 } as const
 
 // 内部值 → 多维表格单选精确文案
@@ -97,7 +101,11 @@ async function ensureOption(fieldName: string, value: string): Promise<void> {
 }
 
 // 把内部行组装成多维表格 fields(只填有值的,空值省略)
-function buildFields(t: TransactionRow, projectName: string): Record<string, any> {
+function buildFields(
+  t: TransactionRow,
+  projectName: string,
+  voucherTokens: string[],
+): Record<string, any> {
   const fields: Record<string, any> = {
     [F.type]: DIRECTION_LABEL[t.direction] ?? t.direction,
     [F.date]: t.occurred_at,
@@ -116,7 +124,102 @@ function buildFields(t: TransactionRow, projectName: string): Record<string, any
     if (t.counterparty_account) fields[F.expenseDetail] = t.counterparty_account
     if (t.counterparty_name) fields[F.expenseObj] = t.counterparty_name
   }
+  if (voucherTokens.length) fields[F.voucher] = voucherTokens.map((tok) => ({ file_token: tok }))
   return fields
+}
+
+// ===================== 凭证图片(附件)=====================
+
+// Readable 流收成 Buffer(messageResource.get 返回的是流,uploadAll 要 Buffer)
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  }
+  return Buffer.concat(chunks)
+}
+
+function extFromContentType(ct: string | undefined): string {
+  if (!ct) return 'jpg'
+  if (ct.includes('png')) return 'png'
+  if (ct.includes('webp')) return 'webp'
+  if (ct.includes('gif')) return 'gif'
+  return 'jpg'
+}
+
+// 凭证列是否存在且为附件类型(缓存:列通常不变;不存在则整段跳过,不阻断其余字段)
+let voucherFieldEnabled: boolean | null = null
+async function hasVoucherField(): Promise<boolean> {
+  if (voucherFieldEnabled !== null) return voucherFieldEnabled
+  try {
+    const info = (await loadFields()).get(F.voucher)
+    voucherFieldEnabled = !!info && info.ui_type === 'Attachment'
+    if (!voucherFieldEnabled) {
+      console.warn(`ℹ️ 多维表格未找到「${F.voucher}」附件列(或类型非附件),凭证图片将不写入。如需凭证,请确认该列已建且类型=附件,然后重启服务`)
+    }
+  } catch {
+    voucherFieldEnabled = false
+  }
+  return voucherFieldEnabled
+}
+
+/**
+ * 下载消息里的凭证图并上传到多维表格,返回 file_token 数组。
+ * 单张失败 best-effort 跳过继续其余;全部失败返回空数组(不阻断记录写入)。
+ * 用户发的图必须走 im.messageResource.get(im.image.get 只下机器人自己传的图)。
+ */
+async function uploadVoucherImages(imageKeys: string[], messageId: string): Promise<string[]> {
+  const tokens: string[] = []
+  if (!messageId) {
+    console.warn('【凭证上传跳过】缺少 message_id,无法下载消息图片')
+    return tokens
+  }
+  for (let i = 0; i < imageKeys.length; i++) {
+    const imageKey = imageKeys[i]
+    try {
+      const dl: any = await apiClient.im.messageResource.get({
+        params: { type: 'image' },
+        path: { message_id: messageId, file_key: imageKey },
+      })
+      const stream: Readable | undefined = dl?.getReadableStream?.()
+      if (!stream) throw new Error('下载返回空流')
+      const buf = await streamToBuffer(stream)
+      if (!buf.length) throw new Error('下载图片字节为空')
+      const up: any = await apiClient.drive.media.uploadAll({
+        data: {
+          file_name: `voucher_${i + 1}.${extFromContentType(dl?.headers?.['content-type'])}`,
+          parent_type: 'bitable_image',
+          parent_node: APP,
+          size: buf.length,
+          file: buf,
+        },
+      })
+      const token = up?.file_token
+      if (token) tokens.push(token)
+      else throw new Error('上传返回无 file_token')
+    } catch (err: any) {
+      console.warn(`【凭证上传失败】image_key=${imageKey}:`, err?.message ?? err, '(已跳过该张,继续其余)')
+    }
+  }
+  return tokens
+}
+
+/**
+ * 确保一笔记录有可用的凭证 file_token:已缓存且数量匹配→复用(纠正时凭证没变,避免重复上传/重复附件);
+ * 否则下载+上传,并把结果回写 SQLite。无凭证图 / 列不存在 → 返回空。
+ */
+async function ensureVoucherTokens(t: TransactionRow): Promise<string[]> {
+  const imageKeys = unpackImages(t.voucher_image_keys)
+  if (!imageKeys.length) return []
+  if (!(await hasVoucherField())) return []
+  const cached = unpackImages(t.voucher_file_tokens)
+  if (cached.length === imageKeys.length) return cached
+  const tokens = await uploadVoucherImages(imageKeys, t.original_message_id)
+  if (tokens.length) {
+    updateTransaction(t.id, { voucherFileTokens: packImages(tokens) })
+    console.log(`🖼️ 凭证已上传 ${tokens.length}/${imageKeys.length} 张 → 多维表格(业务记录 id=${t.id})`)
+  }
+  return tokens
 }
 
 function skipLog(): void {
@@ -140,10 +243,11 @@ export async function writeTransactionToBitable(
   }
   try {
     await ensureOption(F.project, projectName)
+    const voucherTokens = await ensureVoucherTokens(t)
     const res: any = await apiClient.request({
       method: 'POST',
       url: `${basePath}/records`,
-      data: { fields: buildFields(t, projectName) },
+      data: { fields: buildFields(t, projectName, voucherTokens) },
     })
     if (res.code !== 0) throw new Error(`code=${res.code} msg=${res.msg}`)
     const rid = res.data?.record?.record_id ?? null
@@ -168,10 +272,11 @@ export async function updateTransactionInBitable(
   if (!recordId) return
   try {
     await ensureOption(F.project, projectName)
+    const voucherTokens = await ensureVoucherTokens(t)
     const res: any = await apiClient.request({
       method: 'PUT',
       url: `${basePath}/records/${recordId}`,
-      data: { fields: buildFields(t, projectName) },
+      data: { fields: buildFields(t, projectName, voucherTokens) },
     })
     if (res.code !== 0) throw new Error(`code=${res.code} msg=${res.msg}`)
     console.log(`📤 已同步多维表格更新 record=${recordId}`)
@@ -431,6 +536,8 @@ export async function handleBitableRecordChanged(data: any): Promise<void> {
         chatId: '',
         userOpenId: '',
         originalMessageId: '',
+        voucherImageKeys: '',
+        voucherFileTokens: '',
       } satisfies NewTransactionInput)
       updateTransaction(id, { feishuRecordId: recordId })
       console.log(

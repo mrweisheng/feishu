@@ -24,6 +24,8 @@ export interface NewTransactionInput {
   chatId: string
   userOpenId: string
   originalMessageId: string
+  voucherImageKeys: string   // 凭证图 image_key 数组的 JSON 字符串(事实源)
+  voucherFileTokens: string  // 凭证上传多维表格后的 file_token 数组的 JSON 字符串(缓存)
 }
 
 export interface TransactionRow {
@@ -49,9 +51,25 @@ export interface TransactionRow {
   user_open_id: string
   original_message_id: string
   feishu_record_id: string
+  voucher_image_keys: string
+  voucher_file_tokens: string
   is_deleted: number
   created_at: number
   updated_at: number
+}
+
+// 凭证图片标识数组 ↔ JSON 字符串互转(库内存 TEXT;空/坏 JSON 一律视为空数组,防御老数据)
+export function packImages(keys: string[]): string {
+  return keys && keys.length ? JSON.stringify(keys) : ''
+}
+export function unpackImages(s: string | null | undefined): string[] {
+  if (!s) return []
+  try {
+    const arr = JSON.parse(s)
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x) : []
+  } catch {
+    return []
+  }
 }
 
 // ---- 写入 ----
@@ -63,6 +81,7 @@ INSERT INTO transactions (
   settlement_status, settlement_note,
   project_id, project_name_raw, transfer_type, note,
   chat_id, user_open_id, original_message_id,
+  voucher_image_keys, voucher_file_tokens,
   created_at, updated_at
 ) VALUES (
   @direction, @kind, @occurred_at, @occurred_month,
@@ -71,6 +90,7 @@ INSERT INTO transactions (
   @settlement_status, @settlement_note,
   @project_id, @project_name_raw, @transfer_type, @note,
   @chat_id, @user_open_id, @original_message_id,
+  @voucher_image_keys, @voucher_file_tokens,
   @created_at, @updated_at
 )
 `)
@@ -98,6 +118,8 @@ export function addTransaction(t: NewTransactionInput): number {
     chat_id: t.chatId,
     user_open_id: t.userOpenId,
     original_message_id: t.originalMessageId,
+    voucher_image_keys: t.voucherImageKeys,
+    voucher_file_tokens: t.voucherFileTokens,
     created_at: now,
     updated_at: now,
   }).lastInsertRowid as number
@@ -124,6 +146,8 @@ export interface TransactionPatch {
   feishuRecordId?: string
   occurredAt?: number
   occurredMonth?: string
+  voucherImageKeys?: string
+  voucherFileTokens?: string
 }
 
 const PATCH_COL: Record<keyof TransactionPatch, string> = {
@@ -146,6 +170,8 @@ const PATCH_COL: Record<keyof TransactionPatch, string> = {
   feishuRecordId: 'feishu_record_id',
   occurredAt: 'occurred_at',
   occurredMonth: 'occurred_month',
+  voucherImageKeys: 'voucher_image_keys',
+  voucherFileTokens: 'voucher_file_tokens',
 }
 
 export function updateTransaction(id: number, patch: TransactionPatch): boolean {
@@ -174,6 +200,52 @@ const latestByUser = db.prepare(
 )
 export function getLatestByUser(openId: string): TransactionRow | null {
   return (latestByUser.get(openId) as TransactionRow | undefined) ?? null
+}
+
+// ---- 去重查询(防重复录入) ----
+
+// 第①层:按"源消息 id"精确去重。补录同一条被回复消息时命中(不受日期影响)。
+const byOriginalMsgId = db.prepare(
+  `SELECT id FROM transactions WHERE original_message_id = ? AND is_deleted = 0 LIMIT 1`
+)
+export function findIdByOriginalMessageId(messageId: string): number | null {
+  const row = byOriginalMsgId.get(messageId) as { id: number } | undefined
+  return row?.id ?? null
+}
+
+// 第②层:语义签名去重。重发 / 字段换序 / 改写,只要解析后核心字段相同就视为同一笔。
+// 收入多比一项 our_account;转出暂不带对方账户信息(按需要再加)。
+export interface DupSignature {
+  direction: TxnDirection
+  currency: string
+  amountMinor: number
+  counterpartyName: string | null
+  kind: string
+  projectId: number
+  occurredAt: number
+  ourAccount: string | null
+}
+const dupBySigIncome = db.prepare(
+  `SELECT id FROM transactions
+   WHERE is_deleted = 0 AND direction = ? AND currency = ? AND amount_minor = ?
+     AND IFNULL(counterparty_name, '') = ? AND kind = ? AND project_id = ? AND occurred_at = ?
+     AND our_account = ?
+   LIMIT 1`
+)
+const dupBySigExpense = db.prepare(
+  `SELECT id FROM transactions
+   WHERE is_deleted = 0 AND direction = ? AND currency = ? AND amount_minor = ?
+     AND IFNULL(counterparty_name, '') = ? AND kind = ? AND project_id = ? AND occurred_at = ?
+   LIMIT 1`
+)
+export function findDuplicateBySignature(sig: DupSignature): number | null {
+  const cp = (sig.counterpartyName ?? '').trim()
+  const kind = (sig.kind ?? '').trim()
+  const row = (sig.direction === 'income'
+    ? dupBySigIncome.get(sig.direction, sig.currency, sig.amountMinor, cp, kind, sig.projectId, sig.occurredAt, sig.ourAccount ?? '')
+    : dupBySigExpense.get(sig.direction, sig.currency, sig.amountMinor, cp, kind, sig.projectId, sig.occurredAt)
+  ) as { id: number } | undefined
+  return row?.id ?? null
 }
 
 // ---- 列表(动态过滤) ----

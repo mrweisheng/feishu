@@ -11,6 +11,9 @@ import {
   financeSummary,
   customerGroups,
   listCustomers,
+  packImages,
+  findIdByOriginalMessageId,
+  findDuplicateBySignature,
   type TransactionPatch,
   type FinanceFilters,
 } from './db/transactions.js'
@@ -179,7 +182,7 @@ const RECORD_INCOME_TOOL = {
   input_schema: {
     type: 'object' as const,
     properties: {
-      kind: { type: 'string', description: '款项性质/用途——即模板第1项括号里的说明文字。逐字照抄用户原文,不要理解/改写/归类/补全(用户写"新办尾款"就传"新办尾款")。' },
+      kind: { type: 'string', description: '款项性质/用途——模板第1项括号里的说明文字,只取括号里的用途,逐字照抄。如"收款: 卖车(尾款)"传"尾款"(不带括号外的"卖车");无括号则取说明文字本身(如"新办尾款")。' },
       date: { type: 'string', description: '业务日期 YYYY-MM-DD,如"2026-07-03"' },
       our_account: {
         type: 'string',
@@ -194,6 +197,7 @@ const RECORD_INCOME_TOOL = {
       transfer_type: { type: 'string', description: '可选。转账类型,如"业务收入"。' },
       note: { type: 'string', description: '可选。备注。' },
       amount_raw: { type: 'string', description: '可选。用户原始金额文本,如"17万""HKD $1800",留作审计。' },
+      allow_duplicate: { type: 'boolean', description: '可选。用户明确表示"强制录入/再录一笔/确实是不同的"时传 true,跳过"内容相同"的去重拦截。' },
     },
     required: ['kind', 'date', 'our_account', 'counterparty', 'amount', 'currency', 'settlement_status', 'project_name'],
   },
@@ -206,7 +210,7 @@ const RECORD_EXPENSE_TOOL = {
   input_schema: {
     type: 'object' as const,
     properties: {
-      kind: { type: 'string', description: '转出用途——即模板第1项"转出"后面括号里的说明文字。逐字照抄用户原文,不要理解/改写/归类/补全(用户写"兵哥华哥杂费"就传"兵哥华哥杂费")。' },
+      kind: { type: 'string', description: '转出用途——模板第1项括号里的说明文字,只取括号里的用途,逐字照抄。如"转出(兵哥华哥杂费)"传"兵哥华哥杂费";无括号则取说明文字本身。' },
       date: { type: 'string', description: '业务日期 YYYY-MM-DD' },
       counterparty: { type: 'string', description: '可选。转出对象(收款人名字)' },
       counterparty_account_type: { type: 'string', description: '对方收款方式:现金 / 支付宝 / 微信 / 银行卡(四选一)。从对方账户描述判断。' },
@@ -218,6 +222,7 @@ const RECORD_EXPENSE_TOOL = {
       settlement_note: { type: 'string', description: '可选。结算明细原文。' },
       note: { type: 'string', description: '可选。备注。' },
       amount_raw: { type: 'string', description: '可选。用户原始金额文本,留作审计。' },
+      allow_duplicate: { type: 'boolean', description: '可选。用户明确表示"强制录入/再录一笔/确实是不同的"时传 true,跳过"内容相同"的去重拦截。' },
     },
     required: ['kind', 'date', 'counterparty_account', 'amount', 'currency', 'settlement_status', 'project_name'],
   },
@@ -287,6 +292,8 @@ export interface LlmContext {
   originalMessageId: string
   userOpenId: string
   chatId: string
+  voucherImageKeys?: string[] // 凭证图 image_key(来自富文本消息,只透传给工具,不进 LLM prompt)
+  sourceMessageId?: string // 补录场景:被回复消息(内容来源)的 message_id,用于精确去重 + 溯源
 }
 
 // 转出账户类型归一(只允许写入多维表格单选的 4 个选项之一;判不出留空)
@@ -415,14 +422,30 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       kind?: string; date: string; our_account: string; counterparty?: string
       amount: number; currency: string; settlement_status?: string; project_name: string
       settlement_note?: string; transfer_type?: string; note?: string; amount_raw?: string
+      allow_duplicate?: boolean
     }
     const occ = parseOccurred(inp.date)
     if (!occ) return JSON.stringify({ ok: false, error: `日期无法解析:${inp.date}(需 YYYY-MM-DD)` })
     if (!['HKD', 'RMB'].includes(inp.currency)) return JSON.stringify({ ok: false, error: 'currency 必须是 HKD 或 RMB' })
     if (typeof inp.amount !== 'number' || !(inp.amount > 0)) return JSON.stringify({ ok: false, error: '金额必须为正数' })
     if (!VALID_METHOD_KEYS.has(inp.our_account)) return JSON.stringify({ ok: false, error: `收款账户未知:${inp.our_account}`, methods: PAYMENT_METHODS_HINT })
-    if (!inp.project_name?.trim()) return JSON.stringify({ ok: false, error: '业务名(project_name)不能为空' })
+    if (!inp.project_name?.trim()) return JSON.stringify({ ok: false, error: '群名(project_name)不能为空' })
     const project = resolveProject(inp.project_name)
+    const amountMinor = Math.round(inp.amount * 100)
+    // 去重①:补录同一条被回复消息 → 精确拦截(不受日期影响)
+    if (ctx.sourceMessageId) {
+      const exist = findIdByOriginalMessageId(ctx.sourceMessageId)
+      if (exist !== null) return JSON.stringify({ ok: false, error: '这条消息已经录入过了,无需重复', duplicate_of: exist })
+    }
+    // 去重②:语义相同(重发/换序/改写,同对象/金额/用途/群/日期/收款账户)→ 拦,除非用户强制
+    if (!inp.allow_duplicate) {
+      const dup = findDuplicateBySignature({
+        direction: 'income', currency: inp.currency, amountMinor,
+        counterpartyName: inp.counterparty || null, kind: inp.kind || '',
+        projectId: project.id, occurredAt: occ.occurredAt, ourAccount: inp.our_account,
+      })
+      if (dup !== null) return JSON.stringify({ ok: false, error: '已有一笔相同的记录(同对象/金额/用途/群/日期/收款账户),疑似重复。如确实是另一笔,回复"强制录入"', duplicate_of: dup })
+    }
     const id = addTransaction({
       direction: 'income',
       kind: inp.kind || '',
@@ -432,7 +455,7 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       counterpartyName: inp.counterparty || null,
       counterpartyAccount: null,
       counterpartyAccountType: '',
-      amountMinor: Math.round(inp.amount * 100),
+      amountMinor,
       currency: inp.currency,
       amountRaw: inp.amount_raw || '',
       settlementStatus: inp.settlement_status === 'settled' ? 'settled' : 'pending',
@@ -443,25 +466,43 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       note: inp.note || '',
       chatId: ctx.chatId,
       userOpenId: ctx.userOpenId,
-      originalMessageId: ctx.originalMessageId,
+      originalMessageId: ctx.sourceMessageId ?? ctx.originalMessageId,
+      voucherImageKeys: packImages(ctx.voucherImageKeys || []),
+      voucherFileTokens: '',
     })
-    console.log(`💰 记收款 id=${id} 业务="${project.name}"${project.isNew ? '(新)' : ''} ${inp.amount} ${inp.currency} 对象=${inp.counterparty || '-'}`)
+    console.log(`💰 记收款 id=${id} 业务="${project.name}"${project.isNew ? '(新)' : ''} ${inp.amount} ${inp.currency} 对象=${inp.counterparty || '-'}${(ctx.voucherImageKeys?.length ?? 0) ? ` 凭证${ctx.voucherImageKeys!.length}张` : ''}`)
     await syncToBitable(id, project.name)
     const s = summaryByDirection('income')
-    return JSON.stringify({ ok: true, id, direction: 'income', project_name: project.name, project_is_new: project.isNew, amount: inp.amount, currency: inp.currency, summary: { count: s.count, totals: s.totals }, bitable_link: config.BITABLE_LINK })
+    return JSON.stringify({ ok: true, id, direction: 'income', project_name: project.name, project_is_new: project.isNew, amount: inp.amount, currency: inp.currency, voucher_count: ctx.voucherImageKeys?.length ?? 0, summary: { count: s.count, totals: s.totals }, bitable_link: config.BITABLE_LINK })
   }
   if (name === 'record_expense') {
     const inp = input as {
       kind?: string; date: string; counterparty?: string; counterparty_account_type?: string; counterparty_account?: string
       amount: number; currency: string; settlement_status?: string; project_name: string
       settlement_note?: string; note?: string; amount_raw?: string
+      allow_duplicate?: boolean
     }
     const occ = parseOccurred(inp.date)
     if (!occ) return JSON.stringify({ ok: false, error: `日期无法解析:${inp.date}(需 YYYY-MM-DD)` })
     if (!['HKD', 'RMB'].includes(inp.currency)) return JSON.stringify({ ok: false, error: 'currency 必须是 HKD 或 RMB' })
     if (typeof inp.amount !== 'number' || !(inp.amount > 0)) return JSON.stringify({ ok: false, error: '金额必须为正数' })
-    if (!inp.project_name?.trim()) return JSON.stringify({ ok: false, error: '业务名(project_name)不能为空' })
+    if (!inp.project_name?.trim()) return JSON.stringify({ ok: false, error: '群名(project_name)不能为空' })
     const project = resolveProject(inp.project_name)
+    const amountMinor = Math.round(inp.amount * 100)
+    // 去重①:补录同一条被回复消息 → 精确拦截
+    if (ctx.sourceMessageId) {
+      const exist = findIdByOriginalMessageId(ctx.sourceMessageId)
+      if (exist !== null) return JSON.stringify({ ok: false, error: '这条消息已经录入过了,无需重复', duplicate_of: exist })
+    }
+    // 去重②:语义相同(同对象/金额/用途/群/日期)→ 拦,除非用户强制
+    if (!inp.allow_duplicate) {
+      const dup = findDuplicateBySignature({
+        direction: 'expense', currency: inp.currency, amountMinor,
+        counterpartyName: inp.counterparty || null, kind: inp.kind || '',
+        projectId: project.id, occurredAt: occ.occurredAt, ourAccount: null,
+      })
+      if (dup !== null) return JSON.stringify({ ok: false, error: '已有一笔相同的记录(同对象/金额/用途/群/日期),疑似重复。如确实是另一笔,回复"强制录入"', duplicate_of: dup })
+    }
     const id = addTransaction({
       direction: 'expense',
       kind: inp.kind || '',
@@ -471,7 +512,7 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       counterpartyName: inp.counterparty || null,
       counterpartyAccount: inp.counterparty_account || '',
       counterpartyAccountType: normalizeAccountType(inp.counterparty_account_type),
-      amountMinor: Math.round(inp.amount * 100),
+      amountMinor,
       currency: inp.currency,
       amountRaw: inp.amount_raw || '',
       settlementStatus: inp.settlement_status === 'settled' ? 'settled' : 'pending',
@@ -482,12 +523,14 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       note: inp.note || '',
       chatId: ctx.chatId,
       userOpenId: ctx.userOpenId,
-      originalMessageId: ctx.originalMessageId,
+      originalMessageId: ctx.sourceMessageId ?? ctx.originalMessageId,
+      voucherImageKeys: packImages(ctx.voucherImageKeys || []),
+      voucherFileTokens: '',
     })
-    console.log(`💸 记转出 id=${id} 业务="${project.name}"${project.isNew ? '(新)' : ''} ${inp.amount} ${inp.currency}`)
+    console.log(`💸 记转出 id=${id} 业务="${project.name}"${project.isNew ? '(新)' : ''} ${inp.amount} ${inp.currency}${(ctx.voucherImageKeys?.length ?? 0) ? ` 凭证${ctx.voucherImageKeys!.length}张` : ''}`)
     await syncToBitable(id, project.name)
     const s = summaryByDirection('expense')
-    return JSON.stringify({ ok: true, id, direction: 'expense', project_name: project.name, project_is_new: project.isNew, amount: inp.amount, currency: inp.currency, summary: { count: s.count, totals: s.totals }, bitable_link: config.BITABLE_LINK })
+    return JSON.stringify({ ok: true, id, direction: 'expense', project_name: project.name, project_is_new: project.isNew, amount: inp.amount, currency: inp.currency, voucher_count: ctx.voucherImageKeys?.length ?? 0, summary: { count: s.count, totals: s.totals }, bitable_link: config.BITABLE_LINK })
   }
   if (name === 'correct_transaction') {
     const inp = input as {
@@ -570,7 +613,7 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       if (pid === null) {
         return JSON.stringify({
           ok: false,
-          error: `没找到业务「${inp.project_name}」(要与已有业务逐字一致)`,
+          error: `没找到群「${inp.project_name}」(要与已有群逐字一致)`,
           known_projects: listProjectNames().map((p) => p.name),
         })
       }
@@ -630,6 +673,9 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
 
   const system = `你是一个有帮助又活泼的群助手。当前时间:${currentTimeStr()}(UTC+8, Asia/Shanghai)。用户在飞书群里@你交流。
 回答风格:像群里熟悉的朋友,语气轻松、自然、偶尔用 emoji 调节气氛,避免机械感和官腔。简短直接,不说废话。
+【回复消息 = 上下文】当问题里出现【被回复的消息】标记时:那是用户回复某条消息并@你后,系统读到的"被回复消息"原文,作为这次对话的上下文。
+- 用户没额外打字 → 就是要你处理这条被回复的消息本身:是收款/转出记录 → 按它录入(补录);是查天气/查账等问题 → 回答;不像任何有效请求 → 自然回一句(如"这条没啥要记的呀"),不要硬录。
+- 用户额外打了字 → 以用户本次说的话为主,被回复消息作参考。
 你能力:
 - 设置单次短时提醒:仅当用户明确要"只提醒一次"的短时场景(如"5分钟后提醒我""下午3点提醒我开会""1小时后叫我")时,调用 set_reminder,remind_at 传 ISO 8601 绝对时间(如 2026-07-03T13:05:00+08:00)。确认成功后用轻松的话告诉用户几点会提醒、提醒什么。待办类事项(回访/登记/跟进/处理/完成XX等)走 create_todo,不要用 set_reminder。
 - 查询天气:用户问某地天气、要不要带伞、穿什么时,调用 get_weather 工具。可查当前(不传 date)或未来日期(传 date=YYYY-MM-DD,支持约3天预报)。
@@ -638,15 +684,18 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · 用户没说城市时,先问一句在哪个城市。
 - 记录收款/支出:用户发来半结构化记账文字(按模板:收款 7 项 / 转出 6 项)时,解析后调用工具入库,别把它当闲聊。
   · 收款(客户转给我们)→ record_income;转出(我们付给别人)→ record_expense。
-  · 款项性质/用途(kind):模板第1项"收款/转出"后面括号里的说明(如"新办尾款""兵哥华哥杂费")。**必须逐字照抄原文,不要理解、改写、归类或补全**,用户写什么就原样传什么;没有括号说明就传空字符串。
+  · 款项性质/用途(kind):模板第1项括号"()"里的说明文字,只取括号里的用途,逐字照抄。例:"收款: 卖车(尾款)"→kind="尾款"(不要把括号外的"卖车"带进来);"转出(兵哥华哥杂费)"→kind="兵哥华哥杂费";"收款: 新办尾款"(无括号)→kind="新办尾款"。**不要理解/改写/归类/补全**;完全没有用途说明就传空字符串。
   · 金额写法多样,你要换算成主单位数值传 amount:"17万"=170000、"14万"=140000、"HKD 1800"/"$1800"/"1800HKD"=1800、"210479"=210479;并把币种 HKD/RMB 传 currency,同时把用户原始金额文本传 amount_raw 留底。
   · 收款账户(our_account,只能是这几个 key 之一):${PAYMENT_METHODS_HINT}。用户说法对照:"陈振耀/大陆工商/工商银行"→chen_zhenyao_rmb;"华星/港币账户/华侨银行"→huaxin_hkd;"LI FANGLIANG/ZA/杂费账户"→li_fangliang_hkd;"支付宝/个人支付宝/赵欣朵"→personal_alipay;"微信/个人微信"→personal_wechat;"现金/港币现金/人民币现金"→cash。
   · 转出(我们付给别人)时,还要判断对方收款方式 counterparty_account_type:现金/支付宝/微信/银行卡 四选一(看账户描述:微信→微信、支付宝→支付宝、银行/卡号/转账→银行卡、给现金→现金);收款人名传 counterparty,账户详情(户名/卡号/开户行原文)传 counterparty_account。
   · 业务名(project_name)是最关键字段,关系去重统计。已有业务清单:${projectListStr}。**必须从清单里逐字照抄准确的业务名(不改简繁、不改大小写、不改标点、不加不减字)**;只有确认是全新业务才填一个干净的新名字。这步务必认真,写错会把同一笔业务拆成两条。
-  · 结算状态:用户说"已结清/结清/全部结清/已結清"→settled;"待结清/未结清/还没/待結清"→pending;不确定就填 pending。settlement_note 存明细原文。
-  · 入库后回复必须包含三段:(1) 本笔确认——收/支、金额+币种、用途说明(即 kind,逐字原样,如"新办尾款""兵哥华哥杂费")、对象或账户、业务名(说明已有还是新建)、结算状态;有结算明细(settlement_note)也可顺带提一句;(2) 该方向累计——用工具返回的 summary(count + totals),格式"📊 目前共 N 笔收款/转出:<币种> <合计>",只列 totals 里出现的币种(只有港币就只说港币,不要提 0 的币种),金额用千分位;(3) 表格链接——把工具返回的 bitable_link 原样附上一行"🔗 查看明细:<链接>";若 bitable_link 为空则省略第三段。
-  · 例(收款):"✅ 已记收款 HKD 1,800(用途:新办尾款·黄锦洪),业务『黄锦洪港珠澳大桥新办』已结清。\n📊 目前共 5 笔收款:HKD 12,000、RMB 3,500。\n🔗 查看明细:https://..."
-  · 例(转出):"✅ 已记转出 HKD 1,077(用途:兵哥华哥杂费·LI LUOHUA),业务『5月21日粤Z6Y18港莲塘现牌 换车』已结清。\n📊 目前共 1 笔转出:HKD 1,077。\n🔗 查看明细:https://..."
+  · ⚠️ project_name 其实就是**微信群名**(代码内部才叫"业务"),**跟用户交流时一律用「群」或「群名」称呼,回复正文里不要出现「业务」二字**——例如写"群『X』(新建)""该客户共 3 个群",不要写"业务『X』""3 个业务"。
+  · 结算状态:用户说"已结清/结清/全部结清/已結清"→settled;"待结清/未结清/还没/待結清"→pending;不确定就填 pending。结算明细 settlement_note 逐字存用户在结算状态里写的原文(如"车辆总价86000,抵扣大霸王$20000,已付定金$5000,剩余尾款及杂费已结清"),不改字、不计算。
+  · ⚠️ **必填校验**:收款/转出消息必须同时有「日期」「金额」「币种单位」三项。缺任意一项就**不要调用 record 工具**,直接回复用户"没看到日期/金额/币种,核对一下再发给我"。绝不自己脑补日期、绝不默认填今天。
+  · **防重复**:系统自动拦截重复录入——同一条被回复消息不会被录第二次;内容相同(同对象/金额/用途/群/日期)也会拦。若工具返回"已录入过/已有一笔相同记录",原话转告用户;用户确认"强制录入/再录一笔/确实是不同的"时,record 工具传 allow_duplicate=true 重新录入(同一条消息的重复仍会拦)。
+  · 入库后回复格式(活泼些,适当用 emoji 排版,但别堆砌、别空行过多),按需包含:(1) 本笔确认——首行写"✅ 已记收/支 <金额+币种,千分位>",下面用"·"小项分行列:用途(即 kind,逐字原样)、对象(收款/转出对象)、群(群名,注明"已有"还是"新建")、状态(已结清/待结清);(2) 结算说明——若 settlement_note 非空,单起一段转述给用户看,⚠️这是用户给的说明,只能整理语句使其通顺,**绝对禁止自己计算/加减/列等式/推算任何金额**(不能把"总价86000、抵扣20000、定金5000"算成某个数),拿不准就直接原样引用 settlement_note,为空则省略本段;(3) 凭证——若工具返回 voucher_count>0,单起一段强调"📎 已附 N 张凭证,已存档",为 0 则省略本段;(4) 该方向累计——用工具返回的 summary(count + totals),格式"📊 目前共 N 笔收款/转出:<币种> <合计>",只列 totals 里出现的币种(只有港币就只说港币,不提 0 的币种),千分位;(5) 表格链接——bitable_link 原样附一行"🔗 查看明细:<链接>",为空则省略本段。
+  · 例(收款,带结算说明和凭证):"✅ 已记收款 HKD 69,280\n· 用途:尾款\n· 对象:李文耀\n· 群:6月29日李文耀丰田voxy(新建)\n· 状态:已结清\n📝 结算说明:车辆总价86000,抵扣大霸王$20000,已付定金$5000,剩余尾款及杂费已结清\n📎 已附 1 张凭证,已存档\n📊 目前共 6 笔收款:HKD 120,000\n🔗 查看明细:https://..."
+  · 例(转出):"✅ 已记转出 HKD 1,077\n· 用途:兵哥华哥杂费\n· 对象:LI LUOHUA\n· 群:5月21日粤Z6Y18港莲塘现牌 换车\n· 状态:已结清\n📊 目前共 1 笔转出:HKD 1,077\n🔗 查看明细:https://..."
 - 纠正流水:用户说"把上一条的金额改成X""把最近一条归到Y业务""上一条改成已结清"等时,调用 correct_transaction(target_id 不传=你最近一条),只传要改的字段。
 - 查询收支:用户问"现在有几笔收款/各多少""X客户总共收了多少""X做了几个业务(群)""待结清多少""某月收款多少"等时,调用查询工具,别凭空编数字。
   · 不确定客户名写法时先 list_customers 拿准确名(简繁/大小写要对齐),再 query_finance / customer_groups;业务名同样要与已有业务逐字一致。

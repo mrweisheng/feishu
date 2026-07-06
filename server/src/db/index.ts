@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   user_open_id         TEXT NOT NULL DEFAULT '',        -- 记账人
   original_message_id  TEXT NOT NULL DEFAULT '',        -- @消息 id,便于回复/纠正
   feishu_record_id     TEXT NOT NULL DEFAULT '',        -- 多维表格记录 id(双写同步/纠正用)
+  voucher_image_keys   TEXT NOT NULL DEFAULT '',        -- 凭证图 image_key(JSON 数组,事实源,可随时重传)
+  voucher_file_tokens  TEXT NOT NULL DEFAULT '',        -- 凭证上传表格后的 file_token(JSON 数组,缓存避免重传)
   counterparty_account_type TEXT NOT NULL DEFAULT '',   -- expense:对方账户类型(现金/支付宝/微信/银行卡)
   is_deleted           INTEGER NOT NULL DEFAULT 0,       -- 软删标记:0=正常,1=表格删除(留档溯源,统计/列表全排除)
   created_at           INTEGER NOT NULL,
@@ -126,6 +128,8 @@ addColumnIfMissing('transactions', 'is_deleted', 'is_deleted INTEGER NOT NULL DE
 addColumnIfMissing('reminders', 'batch_id', "batch_id TEXT NOT NULL DEFAULT ''")
 addColumnIfMissing('reminders', 'round', 'round INTEGER NOT NULL DEFAULT 0')
 addColumnIfMissing('reminders', 'todo_record_ids', "todo_record_ids TEXT NOT NULL DEFAULT ''")
+addColumnIfMissing('transactions', 'voucher_image_keys', "voucher_image_keys TEXT NOT NULL DEFAULT ''")
+addColumnIfMissing('transactions', 'voucher_file_tokens', "voucher_file_tokens TEXT NOT NULL DEFAULT ''")
 
 // idx_reminders_batch 引用 batch_id 列,必须在上面迁移补列之后建(旧库 reminders 表已存在但无该列,放建表 exec 块里会 no such column)
 db.exec('CREATE INDEX IF NOT EXISTS idx_reminders_batch ON reminders(batch_id, round)')

@@ -1,6 +1,6 @@
 import { EventDispatcher } from '@larksuiteoapi/node-sdk'
 import { apiClient, wsClient } from './client.js'
-import { saveMessage, fillSenderName } from '../db/messages.js'
+import { saveMessage, fillSenderName, getMessageById } from '../db/messages.js'
 import { fetchHistoryGap } from './history.js'
 import { askLLM, type LlmContext } from '../llm.js'
 import { replyMessage } from './messages.js'
@@ -66,20 +66,72 @@ async function loadBotOpenId(): Promise<string | null> {
   }
 }
 
-// 判断是否 @了机器人;是则返回去掉 @占位符后的纯问题文本,否则返回 null
-function extractQuestion(message: any, botId: string): string | null {
-  if (message.message_type !== 'text') return null
-  const mentions = Array.isArray(message.mentions) ? message.mentions : []
-  const atBot = mentions.some((m: any) => m?.id?.open_id === botId)
-  if (!atBot) return null
+// 富文本 post 取 locale 段(兼容 zh_cn/en_us/裸结构),返回扁平后的 block 数组
+function postBlocks(contentObj: any): any[] {
+  const locale =
+    contentObj?.zh_cn || contentObj?.en_us || contentObj?.ja_jp ||
+    (contentObj && typeof contentObj === 'object' && Object.keys(contentObj).length
+      ? contentObj[Object.keys(contentObj)[0]]
+      : null) ||
+    contentObj
+  return Array.isArray(locale?.content) ? locale.content.flat() : []
+}
 
-  let raw = ''
+// 纯内容抽取(text 取文字 / post 取文字 + 凭证图 image_key),不做 @机器人 判断。
+// content 解析失败或非 text/post 类型 → 返回 null;文字可能为空字符串(如纯图 post)。
+function extractContent(message: any): { text: string; imageKeys: string[] } | null {
+  let contentObj: any
   try {
-    raw = JSON.parse(message.content).text || ''
+    contentObj = JSON.parse(message.content)
   } catch {
     return null
   }
-  return raw.replace(/@_user_\d+/g, '').trim()
+
+  if (message.message_type === 'text') {
+    const text = (contentObj.text || '').replace(/@_user_\d+/g, '').trim()
+    return { text, imageKeys: [] }
+  }
+
+  if (message.message_type === 'post') {
+    let text = ''
+    const imageKeys: string[] = []
+    for (const b of postBlocks(contentObj)) {
+      if (!b || typeof b !== 'object') continue
+      if ((b.tag === 'text' || b.tag === 'a') && typeof b.text === 'string') text += b.text
+      else if (b.tag === 'img' && typeof b.image_key === 'string') imageKeys.push(b.image_key)
+    }
+    text = text.replace(/@_user_\d+/g, '').trim()
+    return { text, imageKeys }
+  }
+
+  return null
+}
+
+// 取"被回复消息"内容(文字 + 凭证图)。优先查 SQLite 归档,缺失再回退飞书 API。
+// 用于补录:用户回复一条收/支消息并@机器人,把那条原消息当上下文喂给 LLM。
+async function loadParentContent(parentId: string): Promise<{ text: string; imageKeys: string[] } | null> {
+  // 1. SQLite 归档优先(机器人对所有所在群都落库,命中率几乎 100%)
+  const row = getMessageById(parentId)
+  if (row?.content) {
+    const c = extractContent({ message_type: row.message_type, content: row.content })
+    if (c && (c.text || c.imageKeys.length)) return c
+  }
+  // 2. 回退飞书 API(原消息不在库里,如机器人入群前发的旧消息)
+  try {
+    const res: any = await apiClient.request({
+      method: 'GET',
+      url: `/open-apis/im/v1/messages/${parentId}`,
+      params: { message_id_type: 'message_id' },
+    })
+    const item = res?.data?.items?.[0] ?? res?.data
+    const c = item?.msg_type && item?.body?.content
+      ? extractContent({ message_type: item.msg_type, content: item.body.content })
+      : null
+    if (c && (c.text || c.imageKeys.length)) return c
+  } catch (err: any) {
+    console.warn('【拉取被回复消息失败】', err.response?.data?.msg || err.message)
+  }
+  return null
 }
 
 // 解析消息文本(用于日志展示),失败回退为 [非文本消息]
@@ -87,7 +139,17 @@ function parseMessageText(message: any): string {
   let text = '[非文本消息]'
   try {
     const contentObj = JSON.parse(message.content)
-    text = contentObj.text || text
+    if (message.message_type === 'text') {
+      text = contentObj.text || text
+    } else if (message.message_type === 'post') {
+      const blocks = postBlocks(contentObj)
+      const t = blocks
+        .filter((b: any) => b && (b.tag === 'text' || b.tag === 'a'))
+        .map((b: any) => b.text || '')
+        .join('')
+      const imgs = blocks.filter((b: any) => b?.tag === 'img').length
+      text = (t || '[富文本无文字]') + (imgs ? ` [${imgs}张图]` : '')
+    }
   } catch {
     console.log('消息解析失败,原始内容:', message.content)
   }
@@ -105,7 +167,10 @@ function logIncomingMessage(userName: string, message: any, text: string): void 
 }
 
 /**
- * 处理 @机器人的群消息:走 LLM 一问一答并回复。
+ * 处理 @机器人的群消息:走 LLM 一问一答并回复。两种形态:
+ *  ① 直接 @机器人 提问 —— 抽本条消息文字作问题。
+ *  ② 回复某条消息 + @机器人(可不打字)—— 把"被回复消息"当上下文喂给 LLM:
+ *     是收/支记录就补录、是问题就回答、不像有效请求就自然回应。
  * 调用方已保证只在「新消息(非重复投递)」时进入,重复消息在 handleIncomingMessage 早退。
  */
 async function tryAnswerMention(message: any, openId: string): Promise<void> {
@@ -119,14 +184,51 @@ async function tryAnswerMention(message: any, openId: string): Promise<void> {
     return
   }
 
-  const question = extractQuestion(message, botOpenId)
-  if (!question) return
+  const mentions = Array.isArray(message.mentions) ? message.mentions : []
+  const atBot = mentions.some((m: any) => m?.id?.open_id === botOpenId)
+  if (!atBot) return
 
-  console.log('🤖 @机器人提问:', question)
+  const own = extractContent(message)
+  const userText = own?.text ?? ''
+  const replyImageKeys = own?.imageKeys ?? []
+
+  let question = userText
+  let imageKeys = replyImageKeys
+  let sourceMessageId: string | undefined
+
+  // 回复某条消息 + @机器人 → 把被回复消息当上下文(可补录,可不打字)
+  if (message.parent_id) {
+    const parent = await loadParentContent(message.parent_id)
+    if (parent) {
+      const header = userText
+        ? `（用户回复了一条消息并@机器人,本次补充说:${userText}。下方"【被回复的消息】"是这次对话的上下文,请据此判断要做什么。）`
+        : `（用户回复了一条消息并@机器人,没有额外打字,意图是让机器人处理下方这条"【被回复的消息】"。请判断它是什么并相应处理。）`
+      question = `${header}\n【被回复的消息】\n${parent.text}`
+      // 凭证图:被回复消息里的图优先,合并本条回复里带的图
+      const seen = new Set(parent.imageKeys)
+      imageKeys = [...parent.imageKeys, ...replyImageKeys.filter((k) => !seen.has(k))]
+      sourceMessageId = message.parent_id
+      console.log(`↩️ 补录模式:被回复消息作为上下文(${parent.text.length}字${parent.imageKeys.length ? `, ${parent.imageKeys.length}张凭证图` : ''})`)
+    } else if (!userText) {
+      // 拉不到原消息、用户也没打字 → 没法处理,提示一下
+      console.log('↩️ 回复+@机器人,但被回复消息拉不到且无文字,提示用户')
+      await replyMessage(message.message_id, `<at user_id="${openId}"></at> 没看到你回复的那条消息内容诶,要不把要办的事直接发给我?`)
+        .catch((e: any) => console.error('【兜底回复失败】', e.response?.data?.msg || e.message))
+      return
+    }
+    // 拉不到原消息但有 userText → 当普通问答,用 userText 继续往下走
+  } else if (!userText) {
+    // 非回复、且无文字(纯 @机器人)→ 无内容可处理,忽略
+    return
+  }
+
+  console.log('🤖 @机器人:', userText || '(无文字,走补录)', imageKeys.length ? `(附带 ${imageKeys.length} 张凭证图)` : '')
   const ctx: LlmContext = {
     originalMessageId: message.message_id,
     userOpenId: openId,
     chatId: message.chat_id,
+    voucherImageKeys: imageKeys.length ? imageKeys : undefined,
+    sourceMessageId,
   }
 
   try {

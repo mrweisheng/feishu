@@ -4,6 +4,7 @@ node_modules/
 # 构建产物
 server/dist/
 web/dist/
+*.tsbuildinfo
 
 # 环境变量(含凭证,勿提交)
 .env
