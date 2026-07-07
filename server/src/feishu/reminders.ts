@@ -11,12 +11,18 @@ import { replyMessage } from './messages.js'
 import { generateReminderText, setOnReminderAdded } from '../llm.js'
 import { getUserName } from './handler.js'
 import { getTodoRecords } from './bitable-todo.js'
+import { config } from '../config.js'
 
 // 主调度精度:为「最近一条提醒」设动态 setTimeout,到点精确触发,中间零空转。
 // 兜底轮询间隔:每 10 分钟慢扫一次,防止动态定时器因误差/新增提醒错过。
 const BACKSTOP_INTERVAL_MS = 10 * 60 * 1000
 
 let dynamicTimer: NodeJS.Timeout | null = null
+
+// 拼接待办表格链接尾部(配了才带)。到点提醒用,方便用户一键跳转查看/勾选完成。
+function todoLinkSuffix(): string {
+  return config.BITABLE_TODO_LINK ? `\n🔗 查看待办:${config.BITABLE_TODO_LINK}` : ''
+}
 
 // 发送一条提醒:LLM 生成活泼文案 @用户,失败回退多样化模板
 async function sendReminder(r: {
@@ -61,7 +67,7 @@ async function sendBatchReminder(r: DueReminder): Promise<void> {
     const head = isLast
       ? `⏰ ${userName},最后提醒!你还有 ${contents.length} 件待办:\n`
       : `📋 ${userName},你还有 ${contents.length} 件待办:\n`
-    await replyMessage(r.original_message_id, `<at user_id="${r.user_open_id}"></at> ${head}${list}`)
+    await replyMessage(r.original_message_id, `<at user_id="${r.user_open_id}"></at> ${head}${list}${todoLinkSuffix()}`)
     console.log(`📋 已发送批次提醒(纯提醒) id=${r.id} batch=${r.batch_id} round=${r.round} 待办=${contents.length} 最后轮=${isLast}`)
     return
   }
@@ -87,7 +93,7 @@ async function sendBatchReminder(r: DueReminder): Promise<void> {
   const head = isLast
     ? `⏰ ${userName},最后提醒!你还有 ${pending.length} 件待办:\n`
     : `📋 ${userName},你还有 ${pending.length} 件待办:\n`
-  await replyMessage(r.original_message_id, `<at user_id="${r.user_open_id}"></at> ${head}${list}`)
+  await replyMessage(r.original_message_id, `<at user_id="${r.user_open_id}"></at> ${head}${list}${todoLinkSuffix()}`)
   console.log(`📋 已发送批次提醒 id=${r.id} batch=${r.batch_id} round=${r.round} 待办=${pending.length} 最后轮=${isLast}`)
 }
 
