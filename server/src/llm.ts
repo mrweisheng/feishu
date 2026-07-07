@@ -373,8 +373,8 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
     // 算 3 轮 + 截止(起点当天 20:00 Asia/Shanghai,超过则不排)
     const day20 = shanghaiAt(startTs, 20, 0)
     const rounds: { round: number; remindAt: number }[] = [{ round: 1, remindAt: startTs }]
-    const r2 = startTs + 2 * 3600_000
-    const r3 = startTs + 3 * 3600_000
+    const r2 = startTs + 2 * 3600_000   // 与 r1 间隔 2h
+    const r3 = r2 + 3 * 3600_000        // 与 r2 间隔 3h(累计 +5h)
     if (r2 <= day20) rounds.push({ round: 2, remindAt: r2 })
     if (r3 <= day20) rounds.push({ round: 3, remindAt: r3 })
 
