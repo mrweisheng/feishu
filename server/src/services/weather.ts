@@ -126,3 +126,49 @@ export async function getWeather(city: string, date?: string): Promise<WeatherIn
     wind: String(noon.windspeedKmph ?? ''),
   }
 }
+
+export interface ForecastDay {
+  date: string // YYYY-MM-DD
+  weekday: string // 周几
+  temperature: string // 最高/最低
+  description: string // 天气描述
+  humidity: string
+  wind: string
+}
+
+/**
+ * 查询某城市未来 N 天逐日预报(N 不传默认返回全部,wttr.in 免费版最多 3 天:今天/明天/后天)。
+ * 用户问"接下来天气""未来几天天气""这周天气"时用本函数一次性拿全部可查天数。
+ * @param city 城市名
+ * @param days 最多返回几天(默认全部,即 3)
+ */
+export async function getWeatherForecast(city: string, days?: number): Promise<{ city: string; days: ForecastDay[] }> {
+  const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`
+  const res = await fetch(url, {
+    headers: { 'Accept': 'application/json' },
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!res.ok) throw new Error(`天气接口返回 ${res.status}`)
+  const data: any = await res.json()
+  const cityName = data?.nearest_area?.[0]?.areaName?.[0]?.value || city
+
+  const all = (Array.isArray(data?.weather) ? data.weather : []) as any[]
+  if (!all.length) throw new Error('天气接口未返回预报数据')
+  const limited = typeof days === 'number' && days > 0 ? all.slice(0, days) : all
+
+  const weekdayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+  const out: ForecastDay[] = limited.map((d) => {
+    const hourly = Array.isArray(d.hourly) ? d.hourly : []
+    const noon = hourly[4] || hourly[0]
+    const wd = isNaN(Date.parse(d.date)) ? '' : weekdayNames[new Date(d.date).getDay()]
+    return {
+      date: d.date,
+      weekday: wd,
+      temperature: `${d.maxtempC}/${d.mintempC}`,
+      description: noon ? describe(String(noon.weatherCode), noon) : '未知',
+      humidity: String(noon?.humidity ?? ''),
+      wind: String(noon?.windspeedKmph ?? ''),
+    }
+  })
+  return { city: cityName, days: out }
+}

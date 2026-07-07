@@ -19,7 +19,7 @@ import {
 } from './db/transactions.js'
 import { resolveProject, listProjectNames, findProjectIdByName, getProjectName } from './db/projects.js'
 import { PAYMENT_METHODS, PAYMENT_METHOD_KEYS } from './db/paymentMethods.js'
-import { getWeather } from './services/weather.js'
+import { getWeather, getWeatherForecast } from './services/weather.js'
 import { writeTransactionToBitable, updateTransactionInBitable } from './feishu/bitable.js'
 import { createTodoInBitable } from './feishu/bitable-todo.js'
 import { config } from './config.js'
@@ -138,7 +138,7 @@ const SET_REMINDER_TOOL = {
 
 const GET_WEATHER_TOOL = {
   name: 'get_weather',
-  description: '查询某城市天气。可查当前实时,也可查未来日期(预报范围约3天)。用户问"XX天气怎样""明天/后天XX天气""热不热""要带伞吗"等时调用。',
+  description: '查询某城市当前实时天气,或某一个具体日期的预报。用户问"现在/今天XX天气""明天/后天XX天气""XX热不热"时调用。注意:本工具一次只查一个时刻;若用户问"接下来""未来几天""这周天气"这种想要多天列表的,改用 get_weather_forecast。',
   input_schema: {
     type: 'object' as const,
     properties: {
@@ -148,7 +148,22 @@ const GET_WEATHER_TOOL = {
       },
       date: {
         type: 'string',
-        description: '可选。要查询的日期,ISO 格式 YYYY-MM-DD,如"2026-07-04"。用户说"今天"则不传此字段(查实时);"明天/后天/具体日期"则换算成日期传入。仅支持未来约3天。',
+        description: '可选。要查询的日期,ISO 格式 YYYY-MM-DD,如"2026-07-04"。用户说"今天"或"现在"则不传此字段(查实时);"明天/后天/具体日期"则换算成日期传入。仅支持未来约3天。',
+      },
+    },
+    required: ['city'],
+  },
+}
+
+const GET_WEATHER_FORECAST_TOOL = {
+  name: 'get_weather_forecast',
+  description: '一次性查询某城市未来多天逐日预报(最多3天:今天/明天/后天)。用户问"接下来天气""未来几天""这周天气""未来一周""几天天气"等想要一个列表时调用本工具,不要逐天调 get_weather。拿到后用列表口语化转述,不要说"拿不到一周",如实说明最多3天即可。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      city: {
+        type: 'string',
+        description: '城市名,中文或英文,如"武汉"、"上海"。',
       },
     },
     required: ['city'],
@@ -424,6 +439,27 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       return JSON.stringify({ ok: false, error: `查询${city}天气失败:${err.message}` })
     }
   }
+  if (name === 'get_weather_forecast') {
+    const { city } = input as { city: string }
+    try {
+      const f = await getWeatherForecast(city)
+      return JSON.stringify({
+        ok: true,
+        city: f.city,
+        days: f.days.map((d) => ({
+          date: d.date,
+          weekday: d.weekday,
+          temperature: d.temperature,
+          description: d.description,
+          humidity: d.humidity,
+          wind: d.wind,
+        })),
+      })
+    } catch (err: any) {
+      console.error('【天气预报查询失败】city=', city, 'msg:', err.message)
+      return JSON.stringify({ ok: false, error: `查询${city}天气预报失败:${err.message}` })
+    }
+  }
   if (name === 'record_income') {
     const inp = input as {
       kind?: string; date: string; our_account: string; counterparty?: string
@@ -692,8 +728,10 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · "到点通知一声就完、不存在完没完成"的事 → set_reminder(单次,不入表)。例如:喝水、拿快递、吃药、下午3点开会、1小时后叫我。提醒到了就行,不存在"办完"一说。
   · 【最高优先级:用户的显式措辞】用户明说"只提醒一次/就提醒一下/5分钟后"→ set_reminder;用户明说"别让我忘了/直到完成/盯着我办完"→ create_todo。措辞信号盖过语义判断。
   · 不确定时优先用 create_todo(渐进式更不容易漏事);但喝水、拿快递、开会这种明显不需要跟进的,别建待办。
-- 查询天气:用户问某地天气、要不要带伞、穿什么时,调用 get_weather 工具。可查当前(不传 date)或未来日期(传 date=YYYY-MM-DD,支持约3天预报)。
-  · 用户说"今天/现在"→ 不传 date;说"明天/后天/具体日期"→ 根据当前日期换算成 YYYY-MM-DD 传入 date。
+- 查询天气:用户问某地天气、要不要带伞、穿什么时调用天气工具。
+  · 两个工具:get_weather 查"当前实时"或"某一个具体日期"(一次一个时刻);get_weather_forecast 查"未来多天逐日列表"(一次拿全部,最多3天)。
+  · 用户说"现在/今天XX天气"→ get_weather 不传 date;说"明天/后天/具体某天"→ get_weather 传 date=YYYY-MM-DD。
+  · 用户说"接下来""未来几天""这周""未来一周""几天天气"等想要多天列表时 → 必须用 get_weather_forecast(别逐天调 get_weather,更别说"拿不到一周")。如实告诉用户最多能查3天,把拿到的逐日结果列出来即可。
   · 拿到结果后用口语转述(别说"温度32湿度55%",要说"32度挺热的,注意防晒 ☀️")。预报给的是最高/最低温,要说"明天 28~35度"。
   · 用户没说城市时,先问一句在哪个城市。
 - 记录收款/支出:用户发来半结构化记账文字(按模板:收款 7 项 / 转出 6 项)时,解析后调用工具入库,别把它当闲聊。
@@ -737,6 +775,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
       tools: [
         SET_REMINDER_TOOL,
         GET_WEATHER_TOOL,
+        GET_WEATHER_FORECAST_TOOL,
         CREATE_TODO_TOOL,
         RECORD_INCOME_TOOL,
         RECORD_EXPENSE_TOOL,
