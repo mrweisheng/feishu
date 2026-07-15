@@ -66,6 +66,35 @@ async function loadBotOpenId(): Promise<string | null> {
   }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+// 启动时带重试拉取机器人 open_id:启动瞬间 tenant_access_token 可能尚未缓存就绪、或网络抖动,
+// 旧实现一次失败即永久不可用。间隔递增重试直到成功,覆盖启动期瞬时故障。
+async function loadBotOpenIdWithRetry(): Promise<string | null> {
+  const delays = [2_000, 5_000, 15_000, 30_000]
+  let id = await loadBotOpenId()
+  for (let i = 0; !id && i < delays.length; i++) {
+    console.warn(`【bot open_id】未就绪,${delays[i] / 1000}s 后重试(${i + 1}/${delays.length})`)
+    await sleep(delays[i])
+    id = await loadBotOpenId()
+  }
+  return id
+}
+
+// 懒加载兜底:运行期 botOpenId 为空(启动重试也全失败)时,由首条 @消息触发重新拉取,实现自愈。
+// 60s 节流防频繁打接口;lastBotOpenIdAttempt 在 await 前置位,并发到达的多条 @消息只触发一次实际请求。
+let lastBotOpenIdAttempt = 0
+const BOT_OPEN_ID_RETRY_MS = 60_000
+async function ensureBotOpenId(): Promise<string | null> {
+  if (botOpenId) return botOpenId
+  const now = Date.now()
+  if (now - lastBotOpenIdAttempt < BOT_OPEN_ID_RETRY_MS) return null
+  lastBotOpenIdAttempt = now
+  const id = await loadBotOpenId()
+  if (id) botOpenId = id
+  return id
+}
+
 // 富文本 post 取 locale 段(兼容 zh_cn/en_us/裸结构),返回扁平后的 block 数组
 function postBlocks(contentObj: any): any[] {
   const locale =
@@ -177,11 +206,17 @@ async function tryAnswerMention(message: any, openId: string): Promise<void> {
   if (message.chat_type !== 'group') return
 
   if (!botOpenId) {
-    // botOpenId 未就绪(拉取中或失败),收到含 @ 的消息时提示
+    // botOpenId 未就绪(启动拉取失败):含 @ 的消息触发懒加载重试,实现运行期自愈
     if (Array.isArray(message.mentions) && message.mentions.length) {
-      console.log('⚠️ botOpenId 未就绪,暂无法处理 @机器人消息')
+      console.log('⚠️ botOpenId 未就绪,尝试重新拉取...')
+      const id = await ensureBotOpenId()
+      if (!id) {
+        console.log('⚠️ botOpenId 仍未就绪,暂无法处理 @机器人消息')
+        return
+      }
+    } else {
+      return
     }
-    return
   }
 
   const mentions = Array.isArray(message.mentions) ? message.mentions : []
@@ -283,8 +318,8 @@ async function handleIncomingMessage(data: FeishuEvent): Promise<void> {
  * 与 HTTP 服务并行运行在同一个进程里。
  */
 export function startFeishuWorker(): void {
-  // 异步拉取机器人 open_id(不阻塞启动;未就绪期间收到的 @消息会被跳过)
-  loadBotOpenId().then((id) => { botOpenId = id }).catch((e: any) => console.error('【loadBotOpenId 未捕获】', e?.message ?? e))
+  // 异步拉取机器人 open_id(带重试,覆盖启动瞬间抖动;未就绪期间 @消息会触发懒加载兜底)
+  loadBotOpenIdWithRetry().then((id) => { botOpenId = id }).catch((e: any) => console.error('【loadBotOpenId 未捕获】', e?.message ?? e))
 
   // 注册消息事件 + 多维表格记录变更事件(反向同步)
   // 顶层 try/catch:任一未预期异常都兜住,避免 async 回调 reject 冒泡到 SDK、拖垮长连接
