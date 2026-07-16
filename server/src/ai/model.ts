@@ -8,7 +8,9 @@ import { config } from '../config.js'
 // 两边共享同一份 baseURL/apiKey/model 配置,避免散落多处。
 
 // Anthropic SDK 客户端(@anthropic-ai/sdk,用于手写 tool-use loop)
-export const anthropic = new Anthropic()
+// timeout/maxRetries:MiniMax 偶发慢响应或抖动时,默认无超时会单请求挂很久。
+// 单次请求上限 60s(问答应足够),失败让上层兜底回复,避免请求堆积。
+export const anthropic = new Anthropic({ timeout: 60_000, maxRetries: 2 })
 
 // AI SDK LanguageModel 工厂(@ai-sdk/anthropic,用于 Mastra Agent)
 const aiSdkAnthropic = createAnthropic({

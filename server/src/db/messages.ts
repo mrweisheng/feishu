@@ -9,12 +9,12 @@ INSERT OR IGNORE INTO messages (
   message_id, chat_id, chat_type, message_type,
   sender_open_id, sender_user_id, sender_union_id, sender_type, sender_name,
   root_id, parent_id, content, raw_data,
-  create_time, received_at, source
+  create_time, received_at, source, is_bot
 ) VALUES (
   @message_id, @chat_id, @chat_type, @message_type,
   @sender_open_id, @sender_user_id, @sender_union_id, @sender_type, @sender_name,
   @root_id, @parent_id, @content, @raw_data,
-  @create_time, @received_at, @source
+  @create_time, @received_at, @source, @is_bot
 )
 `)
 
@@ -27,14 +27,24 @@ const updateSenderName = db.prepare(
   `UPDATE messages SET sender_name = ? WHERE message_id = ?`
 )
 
-const countAll = db.prepare('SELECT COUNT(*) AS c FROM messages')
+const countAll = db.prepare('SELECT COUNT(*) AS c FROM messages WHERE is_bot = 0')
+const countAllIncludeBot = db.prepare('SELECT COUNT(*) AS c FROM messages')
 
+// 默认只看用户消息(is_bot=0);includeBot=true 时返回全部(含机器人回复)
 const listAll = db.prepare(
+  `SELECT message_id, chat_id, chat_type, message_type, sender_name, content, create_time, source
+   FROM messages WHERE is_bot = 0 ORDER BY create_time DESC LIMIT ? OFFSET ?`
+)
+const listAllIncludeBot = db.prepare(
   `SELECT message_id, chat_id, chat_type, message_type, sender_name, content, create_time, source
    FROM messages ORDER BY create_time DESC LIMIT ? OFFSET ?`
 )
 
 const listByChat = db.prepare(
+  `SELECT message_id, chat_id, chat_type, message_type, sender_name, content, create_time, source
+   FROM messages WHERE is_bot = 0 AND chat_id = ? ORDER BY create_time DESC LIMIT ? OFFSET ?`
+)
+const listByChatIncludeBot = db.prepare(
   `SELECT message_id, chat_id, chat_type, message_type, sender_name, content, create_time, source
    FROM messages WHERE chat_id = ? ORDER BY create_time DESC LIMIT ? OFFSET ?`
 )
@@ -62,6 +72,16 @@ export interface QueryMessagesParams {
   chatId?: string
   limit: number
   offset: number
+  /** 是否包含机器人消息(默认 false,只看用户消息) */
+  includeBot?: boolean
+}
+
+// 判断发送人是否是机器人/app。飞书两个数据源的 sender_type 取值不同:
+// 实时事件 im.message.receive_v1 → 'bot';历史 API GET /im/v1/messages → 'app'。
+// 两者都算"机器人自己发的",统一标记 is_bot=1,查询时默认过滤掉。
+function isBotSender(sender: any): boolean {
+  const t = sender?.sender_type
+  return t === 'bot' || t === 'app'
 }
 
 /**
@@ -91,6 +111,7 @@ export function saveMessage(data: FeishuEvent, source: 'realtime' | 'history' = 
       create_time:     Number(message.create_time) || null,
       received_at:     now,
       source,
+      is_bot:          isBotSender(sender) ? 1 : 0,
     })
 
     // 只有主表真正新增时,才插 mentions(避免旧消息重复插)
@@ -136,8 +157,15 @@ export function getMessageById(messageId: string): StoredMessage | null {
   return (byIdRow.get(messageId) as StoredMessage | undefined) ?? null
 }
 
-// 列表查询:可选按 chat_id 过滤,统一走预编译语句
-export function queryMessages({ chatId, limit, offset }: QueryMessagesParams): MessageRow[] {
+// 列表查询:可选按 chat_id 过滤,默认排除机器人消息
+export function queryMessages({ chatId, limit, offset, includeBot }: QueryMessagesParams): MessageRow[] {
+  if (includeBot) {
+    return (
+      chatId
+        ? listByChatIncludeBot.all(chatId, limit, offset)
+        : listAllIncludeBot.all(limit, offset)
+    ) as MessageRow[]
+  }
   return (
     chatId
       ? listByChat.all(chatId, limit, offset)
@@ -145,8 +173,9 @@ export function queryMessages({ chatId, limit, offset }: QueryMessagesParams): M
   ) as MessageRow[]
 }
 
-export function countMessages(): number {
-  return (countAll.get() as { c: number }).c
+export function countMessages(includeBot = false): number {
+  const row = (includeBot ? countAllIncludeBot : countAll).get() as { c: number } | undefined
+  return row?.c ?? 0
 }
 
 // 某群最后一条消息的 create_time(历史补漏增量起点),无记录返回 null

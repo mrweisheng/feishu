@@ -1,28 +1,11 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { anthropic, modelName } from './ai/model.js'
-import { addReminder, addBatchReminders } from './db/reminders.js'
-import {
-  addTransaction,
-  getLatestByUser,
-  getTransaction,
-  updateTransaction,
-  summaryByDirection,
-  listTransactions,
-  financeSummary,
-  customerGroups,
-  listCustomers,
-  packImages,
-  findIdByOriginalMessageId,
-  findDuplicateBySignature,
-  type TransactionPatch,
-  type FinanceFilters,
-} from './db/transactions.js'
-import { resolveProject, listProjectNames, findProjectIdByName, getProjectName } from './db/projects.js'
-import { PAYMENT_METHODS, PAYMENT_METHOD_KEYS } from './db/paymentMethods.js'
-import { getWeather, getWeatherForecast } from './services/weather.js'
-import { writeTransactionToBitable, updateTransactionInBitable } from './feishu/bitable.js'
-import { createTodoInBitable } from './feishu/bitable-todo.js'
+import { addReminder } from './db/reminders.js'
+import { addLead, getLeadById } from './db/customerLeads.js'
+import { syncLeadToBitable, isCustomerBitableEnabled } from './feishu/bitable-customer.js'
+import { downloadMessageImage } from './feishu/media.js'
 import { config } from './config.js'
+import { getWeather, getWeatherForecast } from './services/weather.js'
 
 // 当前时间字符串(Asia/Shanghai),注入 system prompt 让 LLM 有时间观念
 function currentTimeStr(): string {
@@ -34,92 +17,22 @@ function currentTimeStr(): string {
   }).format(new Date())
 }
 
-// 解析业务日期(YYYY-MM-DD 或 YYYY/M/D)→ 该日 Asia/Shanghai 00:00 的毫秒 + 'YYYY-MM'
-function parseOccurred(date: string): { occurredAt: number; occurredMonth: string } | null {
-  const m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/.exec(date.trim())
-  if (!m) return null
-  const y = m[1]
-  const mo = m[2].padStart(2, '0')
-  const d = m[3].padStart(2, '0')
-  const occurredAt = Date.parse(`${y}-${mo}-${d}T00:00:00+08:00`)
-  if (isNaN(occurredAt)) return null
-  return { occurredAt, occurredMonth: `${y}-${mo}` }
-}
-
-// 解析查询日期边界(YYYY-MM-DD 或 YYYY/M/D)→ Asia/Shanghai 毫秒。startOfDay=该日00:00,否则该日23:59:59
-function parseDateBound(date: string, startOfDay: boolean): number | null {
-  const m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/.exec(date.trim())
-  if (!m) return null
-  const y = m[1]
-  const mo = m[2].padStart(2, '0')
-  const d = m[3].padStart(2, '0')
-  const iso = startOfDay ? `${y}-${mo}-${d}T00:00:00+08:00` : `${y}-${mo}-${d}T23:59:59+08:00`
-  const t = Date.parse(iso)
-  return isNaN(t) ? null : t
-}
-
-// ts 所在 Asia/Shanghai 日期的 H:M(0-23,0-59)对应的时间戳(毫秒)
-function shanghaiAt(ts: number, hour: number, minute: number): number {
-  const [y, m, d] = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date(ts)).split('-').map(Number)
-  return Date.parse(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00+08:00`)
-}
-
-// 次日 Asia/Shanghai 的 H:M 时间戳(无具体时间时渐进式提醒的起点,默认次日9:30)
-function nextDayAt(hour: number, minute: number): number {
-  return shanghaiAt(Date.now() + 24 * 3600_000, hour, minute)
-}
-
-// ts 在 Asia/Shanghai 时区的友好描述:相对今天(今天/明天/M月D日)+ HH:MM
-function formatShanghaiRelative(ts: number): string {
-  const [y, m, d] = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date(ts)).split('-').map(Number)
-  const time = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(new Date(ts))
-  const [ty, tm, td] = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date()).split('-').map(Number)
-  const today0 = Date.parse(`${ty}-${String(tm).padStart(2, '0')}-${String(td).padStart(2, '0')}T00:00:00+08:00`)
-  const that0 = Date.parse(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T00:00:00+08:00`)
-  const diffDays = Math.round((that0 - today0) / 86400000)
-  if (diffDays === 0) return `今天 ${time}`
-  if (diffDays === 1) return `明天 ${time}`
-  return `${m}月${d}日 ${time}`
-}
-
-// create_todo 成功后后端直接拼回复(绕过 LLM):链接必带 + 语气俏皮 + 随机开头避免死板
-const TODO_REPLY_OPENERS = ['好嘞～已帮你建', '安排上!已建', '收到～已帮你建', '没问题,已入库']
-function buildTodoReply(
-  items: string[],
-  rounds: { round: number; remindAt: number }[],
-  link: string,
-): string {
-  const opener = TODO_REPLY_OPENERS[Math.floor(Math.random() * TODO_REPLY_OPENERS.length)]
-  const lines: string[] = [`✅ ${opener} ${items.length} 条待办:`]
-  for (const c of items) lines.push(`- ${c}`)
-  const first = formatShanghaiRelative(rounds[0].remindAt)
-  const later = rounds.slice(1).map((r) =>
-    new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(r.remindAt)),
-  )
-  if (rounds.length === 1) {
-    lines.push(`⏰ ${first} 提醒你一次(当晚 8 点前没法再排更多轮啦)`)
-  } else {
-    lines.push(`⏰ ${first} 第一轮,之后 ${later.join('、')} 各查一次(没完成才再叨扰你哈)`)
+// 解析 LLM 给的 remind_at:无时区信息时按 Asia/Shanghai(+08:00)兜底,避免按服务器时区解析导致 8h 漂移。
+// 支持:ISO 8601 带时区("2026-07-03T13:05:00+08:00" / "...Z")、无时区("2026-07-03T13:05:00" / "2026-07-03 13:05")。
+const HAS_TIMEZONE = /[Zz]$|[+-]\d{2}:?\d{2}$/
+function parseRemindAt(input: string): number {
+  let s = input.trim()
+  // 归一化:把 "YYYY-MM-DD HH:MM[:SS]" 形式的空格替换成 T(纯日期会保留原样由 Date.parse 处理)
+  s = s.replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(?::\d{2})?)$/, '$1T$2')
+  if (!HAS_TIMEZONE.test(s)) {
+    s += '+08:00'
   }
-  if (link) lines.push(`🔗 查看待办:${link}`)
-  return lines.join('\n')
+  return Date.parse(s)
 }
-
-// 我方收款方式提示串(供 system prompt 告诉 LLM 可选 key)
-const PAYMENT_METHODS_HINT = PAYMENT_METHODS.map((m) => `${m.key}(${m.label})`).join('、')
-const VALID_METHOD_KEYS = new Set(PAYMENT_METHOD_KEYS)
 
 const SET_REMINDER_TOOL = {
   name: 'set_reminder',
-  description: '设置一条单次提醒(到点@用户一次,不入表格,无需"完成")。用于不需要持续跟进、到点通知一声就完的事:喝水、拿快递、吃药、下午3点开会、1小时后叫我、5分钟后提醒我打电话。如果这件事需要"办完才算数、没办完要反复提醒"(如回访客户、报销、登记、对账、拜访),用 create_todo,不要用本工具。remind_at 必须是未来的时间。',
+  description: '设置一条单次提醒(到点@用户一次)。用于到点通知一声就完的事:喝水、拿快递、吃药、下午3点开会、1小时后叫我、5分钟后提醒我打电话。remind_at 必须是未来的时间。',
   input_schema: {
     type: 'object' as const,
     properties: {
@@ -170,177 +83,59 @@ const GET_WEATHER_FORECAST_TOOL = {
   },
 }
 
-const CREATE_TODO_TOOL = {
-  name: 'create_todo',
-  description: '在飞书待办表创建待办并排渐进式提醒(3轮:起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒)。用于需要"持续跟进直到完成"的事——有完成状态、没办完会惦记、值得反复提醒:回访客户、登记、跟进、报销、对账、拜访、催款、提交材料等,不限动词。喝水/拿快递/下午开会这类到点通知一声就完、不存在"办完"的事用 set_reminder。多对象(如"回访客户A、B、C")拆成 contents 数组一次调用。',
+const RECORD_CUSTOMER_INFO_TOOL = {
+  name: 'record_customer_info',
+  description: '登记一条客资(销售线索)。当用户说"记一下张三来咨询了""新客户李四""XX加了微信,需求是..."等需要登记线索时调用。客户姓名必填;其他字段(微信、需求、备注、是否重点、是否到店、线索日期)能填就填,不知道就空着。用户没给日期就默认今天。归属人自动填当前 @你的人(这条线索归谁);创建人飞书系统自动记录(API 调用方 = 机器人 app),不用管。',
   input_schema: {
     type: 'object' as const,
     properties: {
-      contents: {
-        type: 'array',
-        items: { type: 'string' },
-        description: '待办内容数组。单条也用数组包,如["回访客户A"];多对象每项一条,如["回访客户A","回访客户B","回访客户C"]。去掉链接和时间词。',
-      },
-      remind_at: {
+      customer_name: {
         type: 'string',
-        description: '可选。起点时间 ISO 8601,如 "2026-07-07T09:30:00+08:00"。有具体时间传它(第1次提醒=该时间);没具体时间不传(默认次日9:30起)。后端自动排 +2h、+3h 两轮,晚8点前截止,每轮未完成才提醒。',
+        description: '客户姓名,必填(不写名字没法登记)。',
       },
-    },
-    required: ['contents'],
-  },
-}
-
-const RECORD_INCOME_TOOL = {
-  name: 'record_income',
-  description:
-    '记录一笔收款(客户转给我们)。当用户发来按模板写的收款信息(款项性质/日期/收款账户/收款对象/金额/结算状态/业务群名)时调用。务必把业务名(project_name)与已有业务逐字对齐。',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      kind: { type: 'string', description: '款项性质/用途——模板第1项括号里的说明文字,只取括号里的用途,逐字照抄。如"收款: 卖车(尾款)"传"尾款"(不带括号外的"卖车");无括号则取说明文字本身(如"新办尾款")。' },
-      date: { type: 'string', description: '业务日期 YYYY-MM-DD,如"2026-07-03"' },
-      our_account: {
+      customer_wechat: {
         type: 'string',
-        description: '我方收款账户 key。只能是:' + PAYMENT_METHODS_HINT,
+        description: '客户微信 ID/账号(可选)。',
       },
-      counterparty: { type: 'string', description: '收款对象(客户名字)' },
-      amount: { type: 'number', description: '金额主单位数值。"17万"=170000、"HKD 1800"=1800。' },
-      currency: { type: 'string', description: '币种:HKD 或 RMB' },
-      settlement_status: { type: 'string', description: '结算状态:settled(已结清) 或 pending(待结清)。不确定填 pending。' },
-      project_name: { type: 'string', description: '业务/群名。必须与已有业务逐字一致;确为全新业务才填新名字。' },
-      settlement_note: { type: 'string', description: '可选。结算明细原文,如"总价19万,定金5万➕尾款14万"。' },
-      transfer_type: { type: 'string', description: '可选。转账类型,如"业务收入"。' },
-      note: { type: 'string', description: '可选。备注。' },
-      amount_raw: { type: 'string', description: '可选。用户原始金额文本,如"17万""HKD $1800",留作审计。' },
-      allow_duplicate: { type: 'boolean', description: '可选。用户明确表示"强制录入/再录一笔/确实是不同的"时传 true,跳过"内容相同"的去重拦截。' },
+      customer_needs: {
+        type: 'string',
+        description: '客户需求(可选,简述)。',
+      },
+      customer_notes: {
+        type: 'string',
+        description: '客户备注(可选,其他想记的)。',
+      },
+      is_key_customer: {
+        type: 'boolean',
+        description: '是否是重点客户(可选,bool)。',
+      },
+      visited_store: {
+        type: 'boolean',
+        description: '是否到店(可选,bool)。',
+      },
+      lead_date: {
+        type: 'string',
+        description: '线索日期(可选)。ISO 8601 带时区字符串,缺时区按 UTC+8 解释。用户说"今天"就传当前时间(不传也行,默认现在);说"昨天" "上周" "2026-07-10" 这类具体日期时算出对应时间。',
+      },
     },
-    required: ['kind', 'date', 'our_account', 'counterparty', 'amount', 'currency', 'settlement_status', 'project_name'],
+    required: ['customer_name'],
   },
-}
-
-const RECORD_EXPENSE_TOOL = {
-  name: 'record_expense',
-  description:
-    '记录一笔转出(我们付给别人)。当用户发来按模板写的转出信息(转出+用途/日期/对方账户/金额/结算状态/业务群名)时调用。务必把业务名与已有业务逐字对齐。',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      kind: { type: 'string', description: '转出用途——模板第1项括号里的说明文字,只取括号里的用途,逐字照抄。如"转出(兵哥华哥杂费)"传"兵哥华哥杂费";无括号则取说明文字本身。' },
-      date: { type: 'string', description: '业务日期 YYYY-MM-DD' },
-      counterparty: { type: 'string', description: '可选。转出对象(收款人名字)' },
-      counterparty_account_type: { type: 'string', description: '对方收款方式:现金 / 支付宝 / 微信 / 银行卡(四选一)。从对方账户描述判断。' },
-      counterparty_account: { type: 'string', description: '对方收款账户详情(自由文本,含户名/卡号/开户行,或"车场付于现金")' },
-      amount: { type: 'number', description: '金额主单位数值。"17万"=170000。' },
-      currency: { type: 'string', description: '币种:HKD 或 RMB' },
-      settlement_status: { type: 'string', description: '结算状态:settled 或 pending。不确定填 pending。' },
-      project_name: { type: 'string', description: '业务/群名。必须与已有业务逐字一致;确为全新业务才填新名字。' },
-      settlement_note: { type: 'string', description: '可选。结算明细原文。' },
-      note: { type: 'string', description: '可选。备注。' },
-      amount_raw: { type: 'string', description: '可选。用户原始金额文本,留作审计。' },
-      allow_duplicate: { type: 'boolean', description: '可选。用户明确表示"强制录入/再录一笔/确实是不同的"时传 true,跳过"内容相同"的去重拦截。' },
-    },
-    required: ['kind', 'date', 'counterparty_account', 'amount', 'currency', 'settlement_status', 'project_name'],
-  },
-}
-
-const CORRECT_TRANSACTION_TOOL = {
-  name: 'correct_transaction',
-  description:
-    '纠正已记录的流水(改金额/币种/结算状态/业务归属/款项性质等)。target_id 不传=纠正该用户最近一条。',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      target_id: { type: 'number', description: '可选。要纠正的流水 id;不传则纠正最近一条。' },
-      project_name: { type: 'string', description: '可选。改挂到的业务名(与已有业务逐字对齐)。' },
-      amount: { type: 'number', description: '可选。新金额主单位数值。' },
-      currency: { type: 'string', description: '可选。HKD 或 RMB。' },
-      settlement_status: { type: 'string', description: '可选。settled 或 pending。' },
-      settlement_note: { type: 'string', description: '可选。结算明细。' },
-      kind: { type: 'string', description: '可选。款项性质/用途(逐字照抄,不改写)。' },
-      note: { type: 'string', description: '可选。备注。' },
-    },
-    required: [],
-  },
-}
-
-const QUERY_FINANCE_TOOL = {
-  name: 'query_finance',
-  description:
-    '查询收付款流水并汇总。可按 收/支方向、客户、业务、结算状态、币种、日期范围 过滤。返回 笔数 + 收入/支出按 HKD/RMB 分别合计(不跨币种换算),可选附明细列表。用户问"现在有几笔收款/各多少""某客户总额""待结清金额""某月收款"等时调用。不确定客户名时先调 list_customers。',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      direction: { type: 'string', description: '可选。income=收款,expense=转出。不传=收+支都算。' },
-      customer: { type: 'string', description: '可选。客户名(收款对象/转出对象)。务必用 list_customers 返回的准确写法(简繁/大小写要对齐),否则查不到。' },
-      project_name: { type: 'string', description: '可选。业务/群名,与已有业务逐字一致。' },
-      status: { type: 'string', description: '可选。settled=已结清,pending=待结清。' },
-      currency: { type: 'string', description: '可选。HKD 或 RMB。' },
-      from: { type: 'string', description: '可选。起始日期 YYYY-MM-DD(含)。' },
-      to: { type: 'string', description: '可选。结束日期 YYYY-MM-DD(含)。' },
-      with_items: { type: 'boolean', description: '可选。true=附上最多10条明细;默认 false(只要汇总)。' },
-    },
-    required: [],
-  },
-}
-
-const CUSTOMER_GROUPS_TOOL = {
-  name: 'customer_groups',
-  description:
-    '查某客户一共有几个业务(群)及每个业务的收支。客户名取自 list_customers 的准确写法。"几个群=该客户找我们办了几笔业务"。用户问"X有几个群""X做了几笔业务""X的所有业务"时调用。',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      customer: { type: 'string', description: '客户名。务必用 list_customers 返回的准确写法(简繁/大小写要对齐)。' },
-    },
-    required: ['customer'],
-  },
-}
-
-const LIST_CUSTOMERS_TOOL = {
-  name: 'list_customers',
-  description:
-    '列出所有客户(收款对象/转出对象去重)及各自笔数/业务数/收支合计。用途:① 用户问"有哪些客户/谁还没结清";② 调 query_finance/customer_groups 前核对客户名的准确写法。',
-  input_schema: { type: 'object' as const, properties: {}, required: [] },
 }
 
 export interface LlmContext {
   originalMessageId: string
   userOpenId: string
   chatId: string
-  voucherImageKeys?: string[] // 凭证图 image_key(来自富文本消息,只透传给工具,不进 LLM prompt)
-  sourceMessageId?: string // 补录场景:被回复消息(内容来源)的 message_id,用于精确去重 + 溯源
-}
-
-// 转出账户类型归一(只允许写入多维表格单选的 4 个选项之一;判不出留空)
-const VALID_EXPENSE_ACCOUNT_TYPES = new Set(['现金', '支付宝', '微信', '银行卡'])
-function normalizeAccountType(raw?: string): string {
-  if (!raw) return ''
-  const s = raw.trim()
-  if (VALID_EXPENSE_ACCOUNT_TYPES.has(s)) return s
-  if (/现金/.test(s)) return '现金'
-  if (/支付宝/.test(s)) return '支付宝'
-  if (/微信/.test(s)) return '微信'
-  if (/银行|工行|建行|农行|中行|招行|卡号|转账|汇款/.test(s)) return '银行卡'
-  return ''
-}
-
-// 取业务标准名(纠正时若没改业务,用它回查当前名)
-function projectNameOf(projectId: number): string {
-  return listProjectNames().find((p) => p.id === projectId)?.name ?? ''
-}
-
-// 落库后 best-effort 同步多维表格,并把 record_id 回写(SQLite 是唯一事实源,失败不影响)
-async function syncToBitable(id: number, projectName: string): Promise<void> {
-  const row = getTransaction(id)
-  if (!row) return
-  const rid = await writeTransactionToBitable(row, projectName)
-  if (rid) updateTransaction(id, { feishuRecordId: rid })
+  /** 消息里的图片 file_key(image 类型或 post 富文本里的 img block) */
+  voucherImageKeys: string[]
+  /** 每张图对应的 message_id(补录模式下,父消息的图要用父消息 id 下载,不能混用) */
+  imageMessageIds?: string[]
 }
 
 async function executeTool(name: string, input: any, ctx: LlmContext): Promise<string> {
   if (name === 'set_reminder') {
     const { remind_at, content } = input as { remind_at: string; content: string }
-    const ts = Date.parse(remind_at)
+    const ts = parseRemindAt(remind_at)
     if (isNaN(ts)) return JSON.stringify({ ok: false, error: '时间格式无法解析' })
     if (ts <= Date.now()) return JSON.stringify({ ok: false, error: '提醒时间已过去,请给一个未来的时间' })
     const id = addReminder({
@@ -355,71 +150,6 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
     onReminderAdded?.()
     return JSON.stringify({ ok: true, remind_at, content })
   }
-  if (name === 'create_todo') {
-    const { contents, remind_at } = input as { contents: string[]; remind_at?: string }
-    // 去重 + 去空
-    const items = Array.from(new Set((contents || []).map((s) => s.trim()).filter(Boolean)))
-    if (!items.length) return JSON.stringify({ ok: false, error: '待办内容(contents)不能为空' })
-
-    // 起点:有 remind_at 用它(校验未来);没传 = 次日 9:30 Asia/Shanghai
-    let startTs: number
-    if (remind_at) {
-      startTs = Date.parse(remind_at)
-      if (isNaN(startTs)) return JSON.stringify({ ok: false, error: '提醒时间格式无法解析' })
-      if (startTs <= Date.now()) return JSON.stringify({ ok: false, error: '提醒时间已过去,请给一个未来的时间' })
-    } else {
-      startTs = nextDayAt(9, 30)
-    }
-
-    // 待办表格是否启用:未配则走纯提醒模式(不写表格,只设渐进式提醒),与 config「留空则只设提醒」承诺一致
-    const todoBitableEnabled = !!(config.BITABLE_TODO_APP_TOKEN && config.BITABLE_TODO_TABLE_ID)
-    const recordIds: string[] = []
-    const successItems: string[] = []
-    if (todoBitableEnabled) {
-      for (const c of items) {
-        const rid = await createTodoInBitable({ content: c, userOpenId: ctx.userOpenId })
-        if (rid) { recordIds.push(rid); successItems.push(c) }
-      }
-      if (!recordIds.length) return JSON.stringify({ ok: false, error: '待办表格写入全部失败' })
-    } else {
-      successItems.push(...items)
-    }
-
-    // 算 3 轮 + 截止(起点当天 20:00 Asia/Shanghai,超过则不排)
-    const day20 = shanghaiAt(startTs, 20, 0)
-    const rounds: { round: number; remindAt: number }[] = [{ round: 1, remindAt: startTs }]
-    const r2 = startTs + 2 * 3600_000   // 与 r1 间隔 2h
-    const r3 = r2 + 3 * 3600_000        // 与 r2 间隔 3h(累计 +5h)
-    if (r2 <= day20) rounds.push({ round: 2, remindAt: r2 })
-    if (r3 <= day20) rounds.push({ round: 3, remindAt: r3 })
-
-    const batchId = `${ctx.originalMessageId}-${Date.now()}`
-    addBatchReminders({
-      batchId,
-      chatId: ctx.chatId,
-      userOpenId: ctx.userOpenId,
-      originalMessageId: ctx.originalMessageId,
-      todoRecordIds: recordIds,
-      contents: todoBitableEnabled ? undefined : successItems,
-      rounds,
-    })
-    onReminderAdded?.()
-
-    const roundStr = rounds
-      .map((r) => new Date(r.remindAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }))
-      .join('、')
-    console.log(`📋 已创建待办 batch=${batchId} 条数=${successItems.length}(${todoBitableEnabled ? '表格' : '纯提醒'}) 轮次=${rounds.length} 起点=${new Date(startTs).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`)
-    return JSON.stringify({
-      ok: true,
-      todo_count: successItems.length,
-      contents: successItems,
-      start_at: new Date(startTs).toISOString(),
-      rounds: rounds.map((r) => ({ round: r.round, at: new Date(r.remindAt).toISOString() })),
-      rounds_time_str: roundStr,
-      bitable_link: config.BITABLE_TODO_LINK,
-      __reply: buildTodoReply(successItems, rounds, config.BITABLE_TODO_LINK),
-    })
-  }
   if (name === 'get_weather') {
     const { city, date } = input as { city: string; date?: string }
     try {
@@ -429,7 +159,8 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
         city: w.city,
         date: w.date ?? null,
         isForecast: w.isForecast,
-        temperature: w.temperature,
+        temperature: w.temperature, // 实时=实际温度;预报=最高/最低
+        feelsLike: w.feelsLike ?? null, // 实时体感温度(预报无);高温高湿时与实际相差大,务必告知用户
         description: w.description,
         humidity: w.humidity,
         wind: w.wind,
@@ -460,242 +191,64 @@ async function executeTool(name: string, input: any, ctx: LlmContext): Promise<s
       return JSON.stringify({ ok: false, error: `查询${city}天气预报失败:${err.message}` })
     }
   }
-  if (name === 'record_income') {
-    const inp = input as {
-      kind?: string; date: string; our_account: string; counterparty?: string
-      amount: number; currency: string; settlement_status?: string; project_name: string
-      settlement_note?: string; transfer_type?: string; note?: string; amount_raw?: string
-      allow_duplicate?: boolean
+  if (name === 'record_customer_info') {
+    const {
+      customer_name,
+      customer_wechat,
+      customer_needs,
+      customer_notes,
+      is_key_customer,
+      visited_store,
+      lead_date,
+    } = input as {
+      customer_name: string
+      customer_wechat?: string
+      customer_needs?: string
+      customer_notes?: string
+      is_key_customer?: boolean
+      visited_store?: boolean
+      lead_date?: string
     }
-    const occ = parseOccurred(inp.date)
-    if (!occ) return JSON.stringify({ ok: false, error: `日期无法解析:${inp.date}(需 YYYY-MM-DD)` })
-    if (!['HKD', 'RMB'].includes(inp.currency)) return JSON.stringify({ ok: false, error: 'currency 必须是 HKD 或 RMB' })
-    if (typeof inp.amount !== 'number' || !(inp.amount > 0)) return JSON.stringify({ ok: false, error: '金额必须为正数' })
-    if (!VALID_METHOD_KEYS.has(inp.our_account)) return JSON.stringify({ ok: false, error: `收款账户未知:${inp.our_account}`, methods: PAYMENT_METHODS_HINT })
-    if (!inp.project_name?.trim()) return JSON.stringify({ ok: false, error: '群名(project_name)不能为空' })
-    const project = resolveProject(inp.project_name)
-    const amountMinor = Math.round(inp.amount * 100)
-    // 去重①:补录同一条被回复消息 → 精确拦截(不受日期影响)
-    if (ctx.sourceMessageId) {
-      const exist = findIdByOriginalMessageId(ctx.sourceMessageId)
-      if (exist !== null) return JSON.stringify({ ok: false, error: '这条消息已经录入过了,无需重复', duplicate_of: exist })
+
+    const name = (customer_name || '').trim()
+    if (!name) {
+      return JSON.stringify({ ok: false, error: '客户姓名是必填的,登记不了匿名线索' })
     }
-    // 去重②:语义相同(重发/换序/改写,同对象/金额/用途/群/日期/收款账户)→ 拦,除非用户强制
-    if (!inp.allow_duplicate) {
-      const dup = findDuplicateBySignature({
-        direction: 'income', currency: inp.currency, amountMinor,
-        counterpartyName: inp.counterparty || null, kind: inp.kind || '',
-        projectId: project.id, occurredAt: occ.occurredAt, ourAccount: inp.our_account,
-      })
-      if (dup !== null) return JSON.stringify({ ok: false, error: '已有一笔相同的记录(同对象/金额/用途/群/日期/收款账户),疑似重复。如确实是另一笔,回复"强制录入"', duplicate_of: dup })
+
+    // 解析 lead_date:无时区按 +08:00 兜底;解析失败默认 now
+    let leadTs = Date.now()
+    if (lead_date && lead_date.trim()) {
+      const ts = parseRemindAt(lead_date.trim())
+      if (!isNaN(ts)) leadTs = ts
     }
-    const id = addTransaction({
-      direction: 'income',
-      kind: inp.kind || '',
-      occurredAt: occ.occurredAt,
-      occurredMonth: occ.occurredMonth,
-      ourAccount: inp.our_account,
-      counterpartyName: inp.counterparty || null,
-      counterpartyAccount: null,
-      counterpartyAccountType: '',
-      amountMinor,
-      currency: inp.currency,
-      amountRaw: inp.amount_raw || '',
-      settlementStatus: inp.settlement_status === 'settled' ? 'settled' : 'pending',
-      settlementNote: inp.settlement_note || '',
-      projectId: project.id,
-      projectNameRaw: inp.project_name,
-      transferType: inp.transfer_type || '',
-      note: inp.note || '',
+
+    const localId = addLead({
+      customerName: name,
+      customerWechat: customer_wechat?.trim() || null,
+      customerNeeds: customer_needs?.trim() || null,
+      customerNotes: customer_notes?.trim() || null,
+      isKeyCustomer: !!is_key_customer,
+      visitedStore: !!visited_store,
+      ownerOpenId: ctx.userOpenId,
+      ownerName: null, // 名字由 handler 异步补/或在展示时按需查;v1 不阻塞
+      leadDate: leadTs,
       chatId: ctx.chatId,
       userOpenId: ctx.userOpenId,
-      originalMessageId: ctx.sourceMessageId ?? ctx.originalMessageId,
-      voucherImageKeys: packImages(ctx.voucherImageKeys || []),
-      voucherFileTokens: '',
+      originalMessageId: ctx.originalMessageId,
     })
-    console.log(`💰 记收款 id=${id} 业务="${project.name}"${project.isNew ? '(新)' : ''} ${inp.amount} ${inp.currency} 对象=${inp.counterparty || '-'}${(ctx.voucherImageKeys?.length ?? 0) ? ` 凭证${ctx.voucherImageKeys!.length}张` : ''}`)
-    await syncToBitable(id, project.name)
-    const s = summaryByDirection('income')
-    return JSON.stringify({ ok: true, id, direction: 'income', project_name: project.name, project_is_new: project.isNew, amount: inp.amount, currency: inp.currency, voucher_count: ctx.voucherImageKeys?.length ?? 0, summary: { count: s.count, totals: s.totals }, bitable_link: config.BITABLE_LINK })
-  }
-  if (name === 'record_expense') {
-    const inp = input as {
-      kind?: string; date: string; counterparty?: string; counterparty_account_type?: string; counterparty_account?: string
-      amount: number; currency: string; settlement_status?: string; project_name: string
-      settlement_note?: string; note?: string; amount_raw?: string
-      allow_duplicate?: boolean
-    }
-    const occ = parseOccurred(inp.date)
-    if (!occ) return JSON.stringify({ ok: false, error: `日期无法解析:${inp.date}(需 YYYY-MM-DD)` })
-    if (!['HKD', 'RMB'].includes(inp.currency)) return JSON.stringify({ ok: false, error: 'currency 必须是 HKD 或 RMB' })
-    if (typeof inp.amount !== 'number' || !(inp.amount > 0)) return JSON.stringify({ ok: false, error: '金额必须为正数' })
-    if (!inp.project_name?.trim()) return JSON.stringify({ ok: false, error: '群名(project_name)不能为空' })
-    const project = resolveProject(inp.project_name)
-    const amountMinor = Math.round(inp.amount * 100)
-    // 去重①:补录同一条被回复消息 → 精确拦截
-    if (ctx.sourceMessageId) {
-      const exist = findIdByOriginalMessageId(ctx.sourceMessageId)
-      if (exist !== null) return JSON.stringify({ ok: false, error: '这条消息已经录入过了,无需重复', duplicate_of: exist })
-    }
-    // 去重②:语义相同(同对象/金额/用途/群/日期)→ 拦,除非用户强制
-    if (!inp.allow_duplicate) {
-      const dup = findDuplicateBySignature({
-        direction: 'expense', currency: inp.currency, amountMinor,
-        counterpartyName: inp.counterparty || null, kind: inp.kind || '',
-        projectId: project.id, occurredAt: occ.occurredAt, ourAccount: null,
-      })
-      if (dup !== null) return JSON.stringify({ ok: false, error: '已有一笔相同的记录(同对象/金额/用途/群/日期),疑似重复。如确实是另一笔,回复"强制录入"', duplicate_of: dup })
-    }
-    const id = addTransaction({
-      direction: 'expense',
-      kind: inp.kind || '',
-      occurredAt: occ.occurredAt,
-      occurredMonth: occ.occurredMonth,
-      ourAccount: null,
-      counterpartyName: inp.counterparty || null,
-      counterpartyAccount: inp.counterparty_account || '',
-      counterpartyAccountType: normalizeAccountType(inp.counterparty_account_type),
-      amountMinor,
-      currency: inp.currency,
-      amountRaw: inp.amount_raw || '',
-      settlementStatus: inp.settlement_status === 'settled' ? 'settled' : 'pending',
-      settlementNote: inp.settlement_note || '',
-      projectId: project.id,
-      projectNameRaw: inp.project_name,
-      transferType: '',
-      note: inp.note || '',
-      chatId: ctx.chatId,
-      userOpenId: ctx.userOpenId,
-      originalMessageId: ctx.sourceMessageId ?? ctx.originalMessageId,
-      voucherImageKeys: packImages(ctx.voucherImageKeys || []),
-      voucherFileTokens: '',
-    })
-    console.log(`💸 记转出 id=${id} 业务="${project.name}"${project.isNew ? '(新)' : ''} ${inp.amount} ${inp.currency}${(ctx.voucherImageKeys?.length ?? 0) ? ` 凭证${ctx.voucherImageKeys!.length}张` : ''}`)
-    await syncToBitable(id, project.name)
-    const s = summaryByDirection('expense')
-    return JSON.stringify({ ok: true, id, direction: 'expense', project_name: project.name, project_is_new: project.isNew, amount: inp.amount, currency: inp.currency, voucher_count: ctx.voucherImageKeys?.length ?? 0, summary: { count: s.count, totals: s.totals }, bitable_link: config.BITABLE_LINK })
-  }
-  if (name === 'correct_transaction') {
-    const inp = input as {
-      target_id?: number; project_name?: string; amount?: number; currency?: string
-      settlement_status?: string; settlement_note?: string; kind?: string; note?: string
-    }
-    const txn = inp.target_id ? getTransaction(inp.target_id) : getLatestByUser(ctx.userOpenId)
-    if (!txn) return JSON.stringify({ ok: false, error: inp.target_id ? `找不到流水 id=${inp.target_id}` : '你还没有可纠正的流水' })
-    const patch: TransactionPatch = {}
-    let newProjectName: string | null = null
-    if (inp.project_name?.trim()) {
-      const p = resolveProject(inp.project_name)
-      patch.projectId = p.id
-      patch.projectNameRaw = inp.project_name
-      newProjectName = p.name
-    }
-    if (typeof inp.amount === 'number' && inp.amount > 0) patch.amountMinor = Math.round(inp.amount * 100)
-    // 币种必须 HKD/RMB:非法值会让 financeSummary 静默漏算、反向同步跳过(与 record_income/expense 校验一致)
-    if (inp.currency === 'HKD' || inp.currency === 'RMB') patch.currency = inp.currency
-    if (inp.settlement_status) patch.settlementStatus = inp.settlement_status === 'settled' ? 'settled' : 'pending'
-    if (inp.settlement_note !== undefined) patch.settlementNote = inp.settlement_note
-    if (inp.kind !== undefined) patch.kind = inp.kind
-    if (inp.note !== undefined) patch.note = inp.note
-    const changed = updateTransaction(txn.id, patch)
-    console.log(`✏️ 纠正流水 id=${txn.id} 改动字段=[${Object.keys(patch).join(',')}]`)
-    if (changed) {
-      const updated = getTransaction(txn.id)
-      const projName = newProjectName ?? projectNameOf(txn.project_id)
-      if (updated && projName) await updateTransactionInBitable(updated.feishu_record_id, updated, projName)
-    }
-    return JSON.stringify({ ok: changed, id: txn.id, updated_fields: Object.keys(patch) })
-  }
-  if (name === 'list_customers') {
-    const rows = listCustomers()
+
+    // 异步同步到飞书 bitable(失败不影响主流程)
+    const fresh = getLeadById(localId)!
+    const feishuRecordId = await syncLeadToBitable(localId, fresh)
+
     return JSON.stringify({
       ok: true,
-      count: rows.length,
-      customers: rows.map((r) => ({
-        name: r.name,
-        count: r.count,
-        group_count: r.group_count,
-        income: { HKD: r.income_hkd, RMB: r.income_rmb },
-        expense: { HKD: r.expense_hkd, RMB: r.expense_rmb },
-      })),
+      lead_id: localId,
+      customer_name: name,
+      lead_date: leadTs,
+      bitable_link: isCustomerBitableEnabled() ? (config.BITABLE_CUSTOMER_LINK || null) : null,
+      bitable_synced: !!feishuRecordId,
     })
-  }
-  if (name === 'customer_groups') {
-    const { customer } = input as { customer: string }
-    const name_ = customer?.trim()
-    if (!name_) return JSON.stringify({ ok: false, error: 'customer 不能为空' })
-    const res = customerGroups(name_)
-    if (!res.matched) {
-      const known = listCustomers().map((c) => c.name)
-      return JSON.stringify({ ok: false, error: `没找到客户「${name_}」`, hint: '核对简繁/大小写,或用 list_customers 看全部客户', known_customers: known })
-    }
-    return JSON.stringify({
-      ok: true,
-      customer: res.customer,
-      group_count: res.group_count,
-      totals: { count: res.totals.count, income: res.totals.income, expense: res.totals.expense },
-      groups: res.projects.map((p) => ({
-        name: p.project_name,
-        count: p.count,
-        income: { HKD: p.income_hkd, RMB: p.income_rmb },
-        expense: { HKD: p.expense_hkd, RMB: p.expense_rmb },
-        net: { HKD: p.net_hkd, RMB: p.net_rmb },
-        last_at: p.last_at,
-      })),
-    })
-  }
-  if (name === 'query_finance') {
-    const inp = input as {
-      direction?: string; customer?: string; project_name?: string; status?: string
-      currency?: string; from?: string; to?: string; with_items?: boolean
-    }
-    const filters: FinanceFilters = {}
-    if (inp.direction === 'income' || inp.direction === 'expense') filters.direction = inp.direction
-    if (inp.customer?.trim()) filters.counterparty = inp.customer.trim()
-    if (inp.project_name?.trim()) {
-      const pid = findProjectIdByName(inp.project_name.trim())
-      if (pid === null) {
-        return JSON.stringify({
-          ok: false,
-          error: `没找到群「${inp.project_name}」(要与已有群逐字一致)`,
-          known_projects: listProjectNames().map((p) => p.name),
-        })
-      }
-      filters.projectId = pid
-    }
-    if (inp.status === 'settled' || inp.status === 'pending') filters.status = inp.status
-    if (inp.currency === 'HKD' || inp.currency === 'RMB') filters.currency = inp.currency
-    if (inp.from) {
-      const t = parseDateBound(inp.from, true)
-      if (t !== null) filters.from = t
-    }
-    if (inp.to) {
-      const t = parseDateBound(inp.to, false)
-      if (t !== null) filters.to = t
-    }
-    const s = financeSummary(filters)
-    const out: Record<string, unknown> = {
-      ok: true,
-      summary: { count: s.count, income: s.income, expense: s.expense },
-      filters,
-    }
-    if (inp.with_items) {
-      const rows = listTransactions({ ...filters, limit: 10, offset: 0 })
-      out.items = rows.map((r) => ({
-        id: r.id,
-        direction: r.direction,
-        date: r.occurred_at,
-        month: r.occurred_month,
-        kind: r.kind,
-        amount: r.amount_minor / 100,
-        currency: r.currency,
-        counterparty: r.counterparty_name,
-        project: getProjectName(r.project_id),
-        status: r.settlement_status,
-      }))
-      out.items_truncated = rows.length >= 10
-    }
-    return JSON.stringify(out)
   }
   return JSON.stringify({ ok: false, error: `未知工具: ${name}` })
 }
@@ -707,65 +260,44 @@ export function setOnReminderAdded(fn: () => void): void {
 }
 
 /**
- * 调用 LLM。带 set_reminder 工具,走标准 tool-use loop(最多 3 轮)。
+ * 调用 LLM。带 set_reminder / 天气工具,走标准 tool-use loop(最多 3 轮)。
  * ctx 提供群/用户/原消息上下文,工具执行时用。
  */
 export async function askLLM(question: string, ctx: LlmContext): Promise<string> {
-  // 已有业务名单注入,供 LLM 把用户手打的群名逐字对齐(容错大小写/错字/简繁)
-  const projectList = listProjectNames().map((p) => p.name)
-  const projectListStr = projectList.length ? projectList.join('、') : '(暂无)'
-
   const system = `你是一个有帮助又活泼的群助手。当前时间:${currentTimeStr()}(UTC+8, Asia/Shanghai)。用户在飞书群里@你交流。
 回答风格:像群里熟悉的朋友,语气轻松、自然、偶尔用 emoji 调节气氛,避免机械感和官腔。简短直接,不说废话。
-⚠️【绝对禁止编造链接】回复里出现的任何 URL/链接,必须原样照抄工具返回结果里的 bitable_link 字段;该字段为空或不存在时,完全不提链接(不要编一个看起来像的网址)。违反这条 = 给用户错误入口,是严重 bug。
-【回复消息 = 上下文】当问题里出现【被回复的消息】标记时:那是用户回复某条消息并@你后,系统读到的"被回复消息"原文,作为这次对话的上下文。
-- 用户没额外打字 → 就是要你处理这条被回复的消息本身:是收款/转出记录 → 按它录入(补录);是查天气/查账等问题 → 回答;不像任何有效请求 → 自然回一句(如"这条没啥要记的呀"),不要硬录。
-- 用户额外打了字 → 以用户本次说的话为主,被回复消息作参考。
 你能力:
-- 设置单次提醒(到点通知一次就完,没有"完成状态"):仅当这件事不需要反复跟进直到完成时用 set_reminder。典型场景:喝水、拿快递、出门、吃药、下午3点开会、1小时后叫我、5分钟后提醒我打电话。remind_at 传 ISO 8601 绝对时间(如 2026-07-03T13:05:00+08:00)。确认成功后用轻松的话告诉用户几点会提醒、提醒什么。
-- ⚠️【set_reminder vs create_todo 怎么选】选择依据不是"工作还是个人",也不是靠某些动词判断,而是看一件事的本质:**它需不需要反复跟进、直到真正完成?**
-  · 需要"持续跟进直到完成"的事 → create_todo(建表+渐进式催办)。它有完成状态,没办完会一直惦记,值得反复提醒。例如:回访客户、登记、跟进、完成报销、对账、拜访客户、催款、提交材料、整理归档。无论工作还是个人(如"还信用卡""续签"),只要没办完会惦记,就用 create_todo。
-  · "到点通知一声就完、不存在完没完成"的事 → set_reminder(单次,不入表)。例如:喝水、拿快递、吃药、下午3点开会、1小时后叫我。提醒到了就行,不存在"办完"一说。
-  · 【最高优先级:用户的显式措辞】用户明说"只提醒一次/就提醒一下/5分钟后"→ set_reminder;用户明说"别让我忘了/直到完成/盯着我办完"→ create_todo。措辞信号盖过语义判断。
-  · 不确定时优先用 create_todo(渐进式更不容易漏事);但喝水、拿快递、开会这种明显不需要跟进的,别建待办。
+- 设置单次提醒:当用户让你到点提醒某事(喝水、拿快递、出门、吃药、下午3点开会、1小时后叫我、5分钟后提醒我打电话等)时调用 set_reminder。remind_at 必须传**带时区**的 ISO 8601 绝对时间(如 2026-07-03T13:05:00+08:00 或 2026-07-03T13:05:00Z)。**绝对不要省略时区** — 缺时区会被强行按北京时间(+08:00)解释,如果用户实际不在北京就可能差 8 小时。确认成功后用轻松的话告诉用户几点会提醒、提醒什么。
 - 查询天气:用户问某地天气、要不要带伞、穿什么时调用天气工具。
   · 两个工具:get_weather 查"当前实时"或"某一个具体日期"(一次一个时刻);get_weather_forecast 查"未来多天逐日列表"(一次拿全部,最多3天)。
   · 用户说"现在/今天XX天气"→ get_weather 不传 date;说"明天/后天/具体某天"→ get_weather 传 date=YYYY-MM-DD。
   · 用户说"接下来""未来几天""这周""未来一周""几天天气"等想要多天列表时 → 必须用 get_weather_forecast(别逐天调 get_weather,更别说"拿不到一周")。如实告诉用户最多能查3天,把拿到的逐日结果列出来即可。
   · 拿到结果后用口语转述(别说"温度32湿度55%",要说"32度挺热的,注意防晒 ☀️")。预报给的是最高/最低温,要说"明天 28~35度"。
+  · ⚠️ **实际温度 vs 体感温度**:实时天气返回里 temperature 是实际温度、feelsLike 是体感温度(高温高湿时体感比实际高很多,如实际34°体感可达44°)。**两者都告诉用户**:先报实际温度,体感明显更高时补一句"体感有44°,闷热得很"(只报实际温度会让用户低估热度;把体感当实际温度报也会误导)。不要纠结、不要说"我看错了",如实把两个数都讲清楚即可。
   · 用户没说城市时,先问一句在哪个城市。
-- 记录收款/支出:用户发来半结构化记账文字(按模板:收款 7 项 / 转出 6 项)时,解析后调用工具入库,别把它当闲聊。
-  · 收款(客户转给我们)→ record_income;转出(我们付给别人)→ record_expense。
-  · 款项性质/用途(kind):模板第1项括号"()"里的说明文字,只取括号里的用途,逐字照抄。例:"收款: 卖车(尾款)"→kind="尾款"(不要把括号外的"卖车"带进来);"转出(兵哥华哥杂费)"→kind="兵哥华哥杂费";"收款: 新办尾款"(无括号)→kind="新办尾款"。**不要理解/改写/归类/补全**;完全没有用途说明就传空字符串。
-  · 金额写法多样,你要换算成主单位数值传 amount:"17万"=170000、"14万"=140000、"HKD 1800"/"$1800"/"1800HKD"=1800、"210479"=210479;并把币种 HKD/RMB 传 currency,同时把用户原始金额文本传 amount_raw 留底。
-  · 收款账户(our_account,只能是这几个 key 之一):${PAYMENT_METHODS_HINT}。用户说法对照:"陈振耀/大陆工商/工商银行"→chen_zhenyao_rmb;"华星/港币账户/华侨银行"→huaxin_hkd;"LI FANGLIANG/ZA/杂费账户"→li_fangliang_hkd;"支付宝/个人支付宝/赵欣朵"→personal_alipay;"微信/个人微信"→personal_wechat;"现金/港币现金/人民币现金"→cash。
-  · 转出(我们付给别人)时,还要判断对方收款方式 counterparty_account_type:现金/支付宝/微信/银行卡 四选一(看账户描述:微信→微信、支付宝→支付宝、银行/卡号/转账→银行卡、给现金→现金);收款人名传 counterparty,账户详情(户名/卡号/开户行原文)传 counterparty_account。
-  · 业务名(project_name)是最关键字段,关系去重统计。已有业务清单:${projectListStr}。**必须从清单里逐字照抄准确的业务名(不改简繁、不改大小写、不改标点、不加不减字)**;只有确认是全新业务才填一个干净的新名字。这步务必认真,写错会把同一笔业务拆成两条。
-  · ⚠️ project_name 其实就是**微信群名**(代码内部才叫"业务"),**跟用户交流时一律用「群」或「群名」称呼,回复正文里不要出现「业务」二字**——例如写"群『X』(新建)""该客户共 3 个群",不要写"业务『X』""3 个业务"。
-  · 结算状态:用户说"已结清/结清/全部结清/已結清"→settled;"待结清/未结清/还没/待結清"→pending;不确定就填 pending。结算明细 settlement_note 逐字存用户在结算状态里写的原文(如"车辆总价86000,抵扣大霸王$20000,已付定金$5000,剩余尾款及杂费已结清"),不改字、不计算。
-  · ⚠️ **必填校验**:收款/转出消息必须同时有「日期」「金额」「币种单位」三项。缺任意一项就**不要调用 record 工具**,直接回复用户"没看到日期/金额/币种,核对一下再发给我"。绝不自己脑补日期、绝不默认填今天。
-  · **防重复**:系统自动拦截重复录入——同一条被回复消息不会被录第二次;内容相同(同对象/金额/用途/群/日期)也会拦。若工具返回"已录入过/已有一笔相同记录",原话转告用户;用户确认"强制录入/再录一笔/确实是不同的"时,record 工具传 allow_duplicate=true 重新录入(同一条消息的重复仍会拦)。
-  · 入库后回复格式(活泼些,适当用 emoji 排版,但别堆砌、别空行过多),按需包含:(1) 本笔确认——首行写"✅ 已记收/支 <金额+币种,千分位>",下面用"·"小项分行列:用途(即 kind,逐字原样)、对象(收款/转出对象)、群(群名,注明"已有"还是"新建")、状态(已结清/待结清);(2) 结算说明——若 settlement_note 非空,单起一段转述给用户看,⚠️这是用户给的说明,只能整理语句使其通顺,**绝对禁止自己计算/加减/列等式/推算任何金额**(不能把"总价86000、抵扣20000、定金5000"算成某个数),拿不准就直接原样引用 settlement_note,为空则省略本段;(3) 凭证——若工具返回 voucher_count>0,单起一段强调"📎 已附 N 张凭证,已存档",为 0 则省略本段;(4) 该方向累计——用工具返回的 summary(count + totals),格式"📊 目前共 N 笔收款/转出:<币种> <合计>",只列 totals 里出现的币种(只有港币就只说港币,不提 0 的币种),千分位;(5) 表格链接——bitable_link 原样附一行"🔗 查看明细:<链接>",为空则省略本段。
-  · 例(收款,带结算说明和凭证):"✅ 已记收款 HKD 69,280\n· 用途:尾款\n· 对象:李文耀\n· 群:6月29日李文耀丰田voxy(新建)\n· 状态:已结清\n📝 结算说明:车辆总价86000,抵扣大霸王$20000,已付定金$5000,剩余尾款及杂费已结清\n📎 已附 1 张凭证,已存档\n📊 目前共 6 笔收款:HKD 120,000\n🔗 查看明细:https://..."
-  · 例(转出):"✅ 已记转出 HKD 1,077\n· 用途:兵哥华哥杂费\n· 对象:LI LUOHUA\n· 群:5月21日粤Z6Y18港莲塘现牌 换车\n· 状态:已结清\n📊 目前共 1 笔转出:HKD 1,077\n🔗 查看明细:https://..."
-- 纠正流水:用户说"把上一条的金额改成X""把最近一条归到Y业务""上一条改成已结清"等时,调用 correct_transaction(target_id 不传=你最近一条),只传要改的字段。
-- 查询收支:用户问"现在有几笔收款/各多少""X客户总共收了多少""X做了几个业务(群)""待结清多少""某月收款多少"等时,调用查询工具,别凭空编数字。
-  · 不确定客户名写法时先 list_customers 拿准确名(简繁/大小写要对齐),再 query_finance / customer_groups;业务名同样要与已有业务逐字一致。
-  · 金额**务必按币种分开报:港币和人民币绝不能加在一起,也不要换算**(工具返回的 income/expense 已按 HKD/RMB 分开)。某币种为 0 就别提它。报金额用主单位+千分位(如"HKD 12,000")。
-  · 一般先报汇总(笔数 + 各币种合计);用户追问明细时再 query_finance 带 with_items=true(最多10条)。查无结果要如实说"没有记录",别编。
-- 创建待办(需持续跟进直到完成的事):当用户 @你 提到「没办完会惦记、值得反复催直到完成」的事时,调 create_todo。这类事有"完成状态",不限于特定动词——回访、登记、跟进、报销、对账、拜访、催款、提交、整理、续费、还款……只要这件事存在"办没办成",就归这里。如"明天9:30提醒我回访客户A、B、C""明天提醒我完成报销""提醒我登记客户""下周盯着我把护照续了"。**无需 wiki 链接**(后端有默认待办表)。
-  · contents = 待办内容数组,去掉链接和时间词。多对象(如"回访客户A、B、C")拆成多项,一次调用传 ["回访客户A","回访客户B","回访客户C"];单条也用数组包 ["整理周报"]。不要为多对象调多次。
-  · remind_at = 起点时间 ISO 8601。用户说了具体时间("明天9:30""下午3点"等)就换算传入(第1次提醒=该时间);没说具体时间("明天提醒我XX")就不传(默认次日9:30起)。
-  · 后端自动排渐进式3轮提醒(起点、+2h、+3h,晚8点截止,每轮检查表格状态,未完成才提醒,合并成一条消息列出)。LLM 不用管轮次。
-  · 入库后后端自动生成回复(✅+内容清单+提醒时间+表格链接),LLM 无需自己组织回复文本。`
+- 登记客资:用户说"记一下XX来咨询了""新客户XX""XX加了微信,需求是..."这种要登记销售线索的话,调用 record_customer_info。**客户姓名必填**,其他字段(微信/需求/备注/是否重点/是否到店/线索日期)能填就填,不知道就空着。**没给日期就默认今天**(lead_date 不传)。**归属人自动填当前 @你的人**(这条线索归谁);**创建人飞书系统自动记录**(API 调用方 = 机器人 app),你不用管,也不要在工具入参里传。登记成功后用轻松的话告诉用户:已记下、哪一天、是不是重点。
+  · **表格链接必须带上(强制)**:工具返回里 bitable_link 字段如果是字符串(非空),**必须在你的回复里把整段 URL 原样附一次**(直接贴,别用 markdown 包,别加"链接:"前缀,别改字),方便同事点开核对是否录入成功。bitable_link 为空时不编链接。
+  · bitable_synced 是 false 时顺便补一句"飞书表格同步失败,本地 SQLite 里有,需要排查"。
+  · 不去重,录就录;用户要"我之前录过了别再录"再说,目前工具直接落库。
+- 批量录入(图):用户发的图片如果是微信联系人截图,就从中提取客户信息登记。**普通照片/表情包/风景图就正常聊天,别瞎调工具**。
+  · ⚠️ **看到联系人截图默认直接录入,不要反问"要不要登记"、不要等用户再确认**。用户发来联系人截图并 @了你,正常意图就是登记,直接逐条调 record_customer_info,录完一次性告诉用户结果。**纯@无文字、或文字就是要登记**→一律直接录,这是最常见的正确行为,别多此一问。
+  · **唯一不录的例外**:用户带了文字、且文字明显**不是**要登记时——如"这个录过没""有没有重复""这个微信号对吗""删掉这个""改成XX""这个客户是谁""查一下XX"这类**查询/核对/修改/删除**意图——**按文字意图回答,绝对不要录入**。判断不准时宁可按文字意图回答,因为误录会污染表格、要人工清。
+  · 两种场景:
+    · 搜索结果列表(多联系人,显示名带日期前缀)→ 逐行解析,**图里看不到微信号就空着**
+    · 单联系人详情(有"朋友资料""发消息"按钮)→ **只 1 条**,备注名里日期+姓名,图里能看到微信号就填
+  · 同事备注**没有统一格式**:日期和姓名可能用斜杠/空格/点/横线任何符号隔,可能 4 位纯数字 / M.DD / M月DD日 / 别的写法——**自己看图,别套固定模式**;年份没明示就当前年。
+  · **拆出日期后,日期之后整段就是客户名称,整段照抄,不要再分产品/品牌/中文括号里人名/其他子字段,也不要在 customer_name 里加任何"备注名:""来源:""微信号:""品牌:"等字段标签**。例:7.13 智能感应灯具 开关(雷思诺) → customer_name 传 "智能感应灯具 开关(雷思诺)"(整段,不是只取 "雷思诺");60716/林佳 → 传 "林佳";7.13 雷思诺 → 传 "雷思诺"。
+  · 名字大多是中文或中英混搭(林佳、小y、Louis),**别把中文"小"误认成拉丁"J/j"**(LLM 视觉弱项)。
+  · 图里看不到联系人信息就**直接问一句**"你发的这是联系人截图吗?",别瞎编。
+  · 每条都调一次 record_customer_info(可以并行 8-10 个 tool_use block);lead_date 传当天 00:00:00 +08:00 的 ISO 字符串(YYYY-MM-DDTHH:mm:ss+08:00,工具内部会转);customer_name 传整段客户名称(上一条规则);is_key_customer 和 visited_store 都不传(默认 false);customer_wechat 图里有就填,没就空;customer_notes **只有用户明确说"备注:xxx""笔记:xxx""补充:xxx"时才填,别瞎编**(图片识别时一律不传)。
+  · 录完一次性告诉用户"已登记 N 条:张三、李四、王五..."(按你识别顺序列,别每条都说一遍)。
+  · **表格链接必须带上(强制,整批只贴一次)**:工具返回里 bitable_link 字段如果是字符串(非空),**必须在你的回复里把整段 URL 原样附一次**(整批就一次,别每条都贴;直接贴,别用 markdown 包,别加"链接:"前缀,别改字),方便同事点开核对。bitable_link 为空时不编链接。
+  · 看 tool result 的 bitable_synced 字段:任一 false 就告诉用户"飞书表格同步失败,本地 SQLite 里有,需要排查",别假装全成功。
+其余问题正常闲聊回答即可。`
 
   const messages: Anthropic.MessageParam[] = [
-    { role: 'user', content: question },
+    { role: 'user', content: await buildUserContent(question, ctx) },
   ]
-
-  // 记账/纠正已成功、但 LLM 未能生成最终回复时的兜底确认文案
-  // (防"处理超时"误导用户重发 → 绕过去重 → 重复记账)
-  let lastSideEffectReply: string | null = null
 
   for (let i = 0; i < 3; i++) {
     const res = await anthropic.messages.create({
@@ -776,13 +308,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
         SET_REMINDER_TOOL,
         GET_WEATHER_TOOL,
         GET_WEATHER_FORECAST_TOOL,
-        CREATE_TODO_TOOL,
-        RECORD_INCOME_TOOL,
-        RECORD_EXPENSE_TOOL,
-        CORRECT_TRANSACTION_TOOL,
-        QUERY_FINANCE_TOOL,
-        CUSTOMER_GROUPS_TOOL,
-        LIST_CUSTOMERS_TOOL,
+        RECORD_CUSTOMER_INFO_TOOL,
       ],
       messages,
     })
@@ -798,26 +324,18 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
       // 把 assistant 完整回复入历史(含 tool_use block,维持推理链)
       messages.push({ role: 'assistant', content: res.content })
       // 执行工具并回灌 tool_result
+      // 单个工具异常不能让整个 LLM 循环崩:catch 后返 ok:false 给 LLM 自行决定下一步
       const toolResults: Anthropic.ToolResultBlockParam[] = []
-      // 本轮某个工具返回的 __reply:等本轮所有工具执行完再返回,避免丢弃同轮已执行工具的副作用(如先 record_income 再 create_todo)
-      let pendingReply: string | null = null
       for (const tu of toolUses) {
-        const result = await executeTool(tu.name, tu.input, ctx)
-        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: result })
+        let result: string
         try {
-          const parsed = JSON.parse(result)
-          if (parsed && typeof parsed.__reply === 'string') pendingReply = parsed.__reply
-          // 记账/纠正成功:记一个兜底确认,循环若用尽未让 LLM 生成回复时用(H3)
-          if (parsed?.ok && (tu.name === 'record_income' || tu.name === 'record_expense')) {
-            const dir = parsed.direction === 'income' ? '收款' : '转出'
-            lastSideEffectReply = `✅ 已记${dir} ${parsed.amount} ${parsed.currency}(群:${parsed.project_name})。回复生成超时,请查表格确认${parsed.bitable_link ? ':' + parsed.bitable_link : ''}`
-          } else if (parsed?.ok && tu.name === 'correct_transaction') {
-            lastSideEffectReply = `✅ 已纠正流水(id=${parsed.id},字段:${(parsed.updated_fields || []).join(',')})。回复生成超时。`
-          }
-        } catch {}
+          result = await executeTool(tu.name, tu.input, ctx)
+        } catch (err: any) {
+          console.error('【工具执行异常】name=', tu.name, 'msg:', err.message, 'stack:', err.stack)
+          result = JSON.stringify({ ok: false, error: `工具内部错误: ${err.message}` })
+        }
+        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: result })
       }
-      // 本轮所有工具已执行完:若有 __reply 直接返回(不丢弃任何已执行工具的副作用)
-      if (pendingReply) return pendingReply
       messages.push({ role: 'user', content: toolResults })
       continue
     }
@@ -830,23 +348,48 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
     return sanitizeReplyLinks(text)
   }
 
-  // 兜底:循环用尽仍未结束。若最后一轮已成功记账/纠正,用兜底确认代替"处理超时",避免误导重发(H3)
-  if (lastSideEffectReply) return sanitizeReplyLinks(lastSideEffectReply)
   return '（抱歉,处理超时,请重试）'
 }
 
-// 链接白名单清洗:LLM 偶发幻觉假链接(如凭空编 faisco.cn),绝不能发给用户。
+// 构造首条 user message 的 content:text(可空)+ 任何图片
+// 缺图就只是 text,缺文就只是图,两者都缺基本不会出现(handler 已早退)
+async function buildUserContent(question: string, ctx: LlmContext): Promise<Anthropic.MessageParam['content']> {
+  const content: Anthropic.MessageParam['content'] = []
+  if (question.trim()) {
+    content.push({ type: 'text', text: question })
+  }
+  if (ctx.voucherImageKeys && ctx.voucherImageKeys.length) {
+    console.log('📷 收到', ctx.voucherImageKeys.length, '张图片,开始下载并附带给 LLM...')
+    for (let i = 0; i < ctx.voucherImageKeys.length; i++) {
+      const key = ctx.voucherImageKeys[i]
+      // 补录模式下 imageMessageIds[i] 是该图所在消息的 id;否则用 originalMessageId
+      const messageId = ctx.imageMessageIds?.[i] || ctx.originalMessageId
+      const img = await downloadMessageImage(messageId, key)
+      if (img) {
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: img.mediaType,
+            data: img.base64,
+          },
+        })
+      }
+    }
+  }
+  return content
+}
+
+// 链接白名单清洗:LLM 偶发幻觉假链接,绝不能发给用户。
 // 只放行已知安全域名(feishu.cn / larksuite);其余 http(s) 链接整行剔除。
-// 凭证图/其他非链接场景不受影响(它们不是 http 开头的纯文本)。
-const SAFE_LINK_HOSTS = ['feishu.cn', 'larksuite.com']
 function sanitizeReplyLinks(text: string): string {
   if (!text) return text
   const lines = text.split('\n')
   const cleaned = lines.filter((line) => {
     // 含链接的行才需要判断;不含 http(s) 的行(绝大多数)直接保留,零性能影响
     if (!/https?:\/\//i.test(line)) return true
-    // 该行有链接:只要出现至少一个白名单域名就保留(LLM 照抄工具返回 bitable_link 的情况)
-    return SAFE_LINK_HOSTS.some((h) => line.toLowerCase().includes(h))
+    // 该行有链接:只要出现至少一个白名单域名就保留
+    return ['feishu.cn', 'larksuite.com'].some((h) => line.toLowerCase().includes(h))
   })
   // 若整段被掏空(极端:LLM 回了一堆假链接没别的),保留原文但抹掉链接,避免回复空白
   if (!cleaned.join('').trim()) {

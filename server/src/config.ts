@@ -17,19 +17,13 @@ export const config = {
   ANTHROPIC_BASE_URL: required('ANTHROPIC_BASE_URL'),
   ANTHROPIC_API_KEY: required('ANTHROPIC_API_KEY'),
   LLM_MODEL: process.env.LLM_MODEL || 'MiniMax-M3',
-  // 多维表格双写(可选:不配则只入 SQLite,跳过飞书表格写入)
-  BITABLE_APP_TOKEN: process.env.BITABLE_APP_TOKEN || '',
-  BITABLE_TABLE_ID: process.env.BITABLE_TABLE_ID || '',
-  // 多维表格链接(录入后回复里附上,便于点击查看)
-  BITABLE_LINK: process.env.BITABLE_LINK || '',
-  // 待办事项多维表格(可选:留空则跳过表格写入,只设提醒)。wiki node token 可直接当 app_token 用
-  BITABLE_TODO_APP_TOKEN: process.env.BITABLE_TODO_APP_TOKEN || '',
-  BITABLE_TODO_TABLE_ID: process.env.BITABLE_TODO_TABLE_ID || '',
-  // 待办表格链接(创建后回复里附上,便于点击查看)
-  BITABLE_TODO_LINK: process.env.BITABLE_TODO_LINK || '',
-  // CORS 允许来源白名单(逗号分隔,如 "https://a.com,https://b.com")。
-  // 留空 = 不挂 CORS 中间件 = 走浏览器默认同源策略(跨域被拒),比无差别放行 * 更安全。
-  CORS_ORIGINS: process.env.CORS_ORIGINS || '',
-  // 反向同步事件原始 payload 落盘开关(联调用,生产建议留空=关)
-  BITABLE_DEBUG_EVENT: process.env.BITABLE_DEBUG_EVENT === '1',
+
+  // 客资多维表格(留空 = 只入 SQLite,跳过飞书表格双写)
+  BITABLE_CUSTOMER_APP_TOKEN: process.env.BITABLE_CUSTOMER_APP_TOKEN || '',
+  BITABLE_CUSTOMER_TABLE_ID: process.env.BITABLE_CUSTOMER_TABLE_ID || '',
+  BITABLE_CUSTOMER_LINK: process.env.BITABLE_CUSTOMER_LINK || '',
+
+  // 提醒重启补偿窗口(毫秒):进程重启后,过期但 < 该窗口的提醒补发,>= 的丢弃。
+  // 防止服务挂半天后重启半夜轰炸用户;30min 是体验与打扰的平衡点。
+  REMINDER_RESEND_WINDOW_MS: Number(process.env.REMINDER_RESEND_WINDOW_MS) || 30 * 60 * 1000,
 }
