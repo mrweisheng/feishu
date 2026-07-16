@@ -5,11 +5,17 @@
 //
 // open-meteo(https://open-meteo.com)优势:
 // - 完全免费、无需 API key、无调用配额(非商业用途每天 1 万次)
-// - geocoding API 原生支持中文城市名(香港/武汉/北京都秒解,返回坐标)
 // - 一次请求同时拿实时(current)+ 多日预报(daily),无需两次往返
 // - 数据齐全:实际温度 + 体感温度(apparent_temperature)+ 湿度 + 风速 + WMO 天气码
 //
+// 城市名→坐标的识别策略(open-meteo geocoding 对简体中文收录不全:大城市认中文,
+// 地级市常只录了拼音,如"驻马店"查不到但"Zhumadian"能查到):
+//   中文原名 →(未命中)→ 转拼音兜底 →(未命中)→ 剥行政区后缀重试
+// 全自动,无需维护任何城市映射表。
+//
 // 两步查询:① geocoding 把城市名→经纬度(带缓存,同一城市不重复查);② 用经纬度查天气。
+
+import { pinyin } from 'pinyin-pro'
 
 // WMO 标准天气代码 → 中文描述(open-meteo 用 WMO code,和 wttr.in 的私有码不同)
 // 完整表见 https://open-meteo.com/en/docs WMO Weather interpretation codes
@@ -69,20 +75,65 @@ interface GeoResult {
 }
 const geoCache = new Map<string, GeoResult>()
 
+// 行政区划后缀:用户常带"市/区/县"后缀(驻马店市→驻马店),geocoding 对纯名称命中率更高。
+const ADMIN_SUFFIXES = ['自治区', '特别行政区', '地区', '盟', '市区', '县', '区', '镇', '乡', '市', '省']
+
+async function geocodeQuery(name: string): Promise<any | null> {
+  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=10&language=zh&format=json`
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) })
+  if (!res.ok) throw new Error(`城市查询接口返回 ${res.status}`)
+  const data: any = await res.json()
+  const results = data?.results
+  if (!Array.isArray(results) || results.length === 0) return null
+  // 同名多结果时按人口降序取第一个(治"火星"误匹配:村镇人口远小于城市,会排后面)
+  return results.sort((a: any, b: any) => (b.population || 0) - (a.population || 0))[0]
+}
+
+// 中文 → 无声调拼音(geocoding 认拼音不认带声调的,如 Zhumadian 不是 Zhùmǎdiàn)
+function toPinyin(name: string): string {
+  return pinyin(name, { toneType: 'none', type: 'array' }).join('')
+}
+
 /**
  * 用 open-meteo geocoding 把城市名解析成坐标。
- * 支持中文/英文城市名(language=zh 优先返回中文名)。结果带缓存。
+ * 识别策略(全自动,无映射表):
+ *   ① 原名直查(中文优先,大城市/特区都认:香港/武汉/北京)
+ *   ② 转拼音查(地级市常只录拼音:驻马店→Zhumadian,石嘴山→Shizuishan)
+ *   ③ 剥行政区后缀后对①②各重试一次(驻马店市→驻马店→Zhumadian)
  * @throws 城市找不到 / 网络错误 时抛出
  */
 async function geocode(city: string): Promise<GeoResult> {
   const cached = geoCache.get(city)
   if (cached) return cached
 
-  const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh&format=json`
-  const res = await fetch(url, { signal: AbortSignal.timeout(8000) })
-  if (!res.ok) throw new Error(`城市查询接口返回 ${res.status}`)
-  const data: any = await res.json()
-  const hit = data?.results?.[0]
+  const trimmed = city.trim()
+
+  // 构造候选查询名列表:原名 + 剥后缀的变体(去重,保持优先级)
+  const candidates: string[] = [trimmed]
+  for (const suffix of ADMIN_SUFFIXES) {
+    if (trimmed.length > suffix.length + 1 && trimmed.endsWith(suffix)) {
+      candidates.push(trimmed.slice(0, -suffix.length))
+      break // 只剥最外层一个后缀即可
+    }
+  }
+
+  // 轮次1:所有候选先查中文原名(中文优先,避免"香港"拼音被匹配到"象岗")
+  let hit: any = null
+  for (const name of candidates) {
+    hit = await geocodeQuery(name).catch(() => null)
+    if (hit) break
+  }
+  // 轮次2:中文全没命中,所有候选转拼音再查(地级市兜底)
+  if (!hit) {
+    for (const name of candidates) {
+      // 纯英文/数字名不转拼音(没意义且会出错)
+      if (/[\u4e00-\u9fff]/.test(name)) {
+        hit = await geocodeQuery(toPinyin(name)).catch(() => null)
+        if (hit) break
+      }
+    }
+  }
+
   if (!hit) throw new Error(`找不到城市「${city}」`)
 
   const result: GeoResult = {
