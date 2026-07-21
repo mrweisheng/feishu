@@ -30,7 +30,6 @@ function buildFields(lead: {
   customer_name: string | null
   customer_wechat: string | null
   customer_needs: string | null
-  customer_notes: string | null
   is_key_customer: number
   visited_store: number
   owner_open_id: string | null
@@ -57,6 +56,73 @@ function buildFields(lead: {
 /** bitable 同步是否启用(三个环境变量都配齐才走双写) */
 export function isCustomerBitableEnabled(): boolean {
   return Boolean(config.BITABLE_CUSTOMER_APP_TOKEN && config.BITABLE_CUSTOMER_TABLE_ID)
+}
+
+/**
+ * 拉取维格表里「某一天」已登记客资的客户名称集合(归一化后),用于批量录入前查重。
+ *
+ * 维格表是事实源 —— 去重以这里实际已有的数据为准,不以本地 SQLite 为准。
+ * 用 filter 按「线索日期 = ExactDate 当天」筛选,飞书自动按文档时区当天零点对齐。
+ * 一次最多拉 500 条(page_size 上限),客资量足够覆盖单天。
+ *
+ * @param dayStartMs 当天某个时刻的毫秒时间戳(内部只取日期部分)
+ * @returns 归一化后的客户名称 Set;未启用或拉取失败返回空 Set(降级:不阻断主流程,后续靠人工清)
+ */
+export async function listExistingNamesOnDate(dayStartMs: number): Promise<Set<string>> {
+  if (!isCustomerBitableEnabled()) return new Set()
+
+  // 飞书 filter 日期语法:["ExactDate", "<毫秒>"],飞书内部按文档时区当天零点对齐
+  const filter = {
+    conjunction: 'and' as const,
+    conditions: [
+      {
+        field_name: FIELD_NAMES.leadDate,
+        operator: 'is' as const,
+        value: ['ExactDate', String(dayStartMs)],
+      },
+    ],
+  }
+
+  try {
+    const res: any = await apiClient.bitable.v1.appTableRecord.search({
+      data: { filter },
+      path: {
+        app_token: config.BITABLE_CUSTOMER_APP_TOKEN,
+        table_id: config.BITABLE_CUSTOMER_TABLE_ID,
+      },
+      // page_size 必须放 params(不是 data),SDK 类型定义明确;默认 20,单天客资可能超 20 → 必须显式提大
+      params: { user_id_type: 'open_id', page_size: 500 },
+    })
+
+    const items: any[] = res?.data?.items ?? res?.data?.records ?? []
+    const names = new Set<string>()
+    for (const item of items) {
+      const fields = item?.fields ?? {}
+      // 「客户名称」是多行文本字段,飞书返回 [{type:'text', text:'...'}] 或纯字符串,都兼容
+      const raw = fields[FIELD_NAMES.name]
+      const text = extractText(raw)
+      if (text) names.add(text) // 归一化交给调用方(normalizeName),这里先存原始
+    }
+    console.log(`📋 去重:维格表当天已有 ${names.size} 条客资记录`)
+    return names
+  } catch (err: any) {
+    const fbCode = err?.response?.data?.code ?? err?.code
+    const fbMsg = err?.response?.data?.msg || err?.message
+    console.warn('【去重】拉取维格表当天记录失败,降级为不去重 code=', fbCode, 'msg:', fbMsg)
+    return new Set()
+  }
+}
+
+// 飞书「多行文本」字段返回值兼容解析:[{type,text}] / [{text}] / 字符串 / 数组拼字符串
+function extractText(raw: any): string {
+  if (raw == null) return ''
+  if (typeof raw === 'string') return raw
+  if (Array.isArray(raw)) {
+    return raw
+      .map((seg: any) => (typeof seg === 'string' ? seg : seg?.text ?? ''))
+      .join('')
+  }
+  return ''
 }
 
 /**

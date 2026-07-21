@@ -1,4 +1,5 @@
 import { db } from './index.js'
+import { stripDatePrefix } from '../llm/toolRegistry.js'
 
 // ---- 预编译语句 ----
 // 插入一条客资(返回新行 id)。不做去重 —— 用户说"录就录",重了手动删。
@@ -101,32 +102,33 @@ export interface NewLeadInput {
 }
 
 /**
- * 插入一条客资。不做去重 —— 用户说"录就录",重了手动删。
- * 兜底(2 层):
- *  1. customer_notes 长得像"MMDD"或"MMDD/xxx"(纯数字前缀),说明 LLM 把整个日期塞进去了
- *     → 扔掉,fallback 到 customer_name
- *  2. customer_notes 没填,但 customer_name 有 → notes = name
- *  (bitable 当前没"客户姓名"列,姓名只能存"客户备注",所以必须保证 notes 有姓名)
+ * 插入一条客资。不做去重 -- 用户说“录就录”,重了手动删。
+ * customer_name 直接写飞书表格「客户名称」列;customer_notes 仅存 SQLite,不同步表格
+ * (备注要的话在飞书表格里自己写)。
  * @returns 新行的 id
  */
 export function addLead(input: NewLeadInput): number {
   // DB 层兜底:customer_name 必须有值。LLM 层已 trim 校验,但万一有别的写入路径绕过,
   // 这里直接 throw,由上层(executeTool 的 try/catch)转成 {ok:false} 返回给 LLM。
-  const name = input.customerName?.trim()
+  let name = input.customerName?.trim()
   if (!name) throw new Error('customer_name 不能为空')
 
+  // DB 层兜底:LLM 偶尔不拆日期前缀(批量录入时尤甚),会把"60717/雅琴"整个塞进
+  // customer_name,而 customer_name 是直接写飞书表格「客户名称」列的字段,不剥就会污染表格。
+  // 这里剥掉开头的日期+分隔符,保留后面整段名字。
+  // 复用 toolRegistry.stripDatePrefix(与去重比对同一份正则,单一事实源,避免两处不一致)
+  const clean = stripDatePrefix(name)
+  if (clean !== name) {
+    console.log(`【客资姓名兜底】日期前缀剥离:"${name}" -> "${clean}"`)
+    name = clean
+  }
+
   const now = Date.now()
-  const rawNotes = input.customerNotes?.trim() || null
-  const looksLikeDatePrefix = rawNotes !== null && (
-    /^\d{3,5}(\/\S+)?$/.test(rawNotes) ||  // "60716" 或 "60716/xxx"
-    /^\d+$/.test(rawNotes)                  // 纯数字
-  )
-  const notes = (rawNotes && !looksLikeDatePrefix) ? rawNotes : name
   return insertLead.run({
     customer_name: name,
     customer_wechat: input.customerWechat,
     customer_needs: input.customerNeeds,
-    customer_notes: notes,
+    customer_notes: input.customerNotes?.trim() || null,
     is_key_customer: input.isKeyCustomer ? 1 : 0,
     visited_store: input.visitedStore ? 1 : 0,
     owner_open_id: input.ownerOpenId,

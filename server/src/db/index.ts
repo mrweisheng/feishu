@@ -62,10 +62,10 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(remind_at, status);
 -- 客资登记(飞书「客资信息登记表」的事实源;双写时飞书表格是副本)
 CREATE TABLE IF NOT EXISTS customer_leads (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  customer_name       TEXT,                          -- 客户姓名(可选:bitable 暂未加该字段,以后再加)
+  customer_name       TEXT,                          -- 客户姓名(同步 bitable「客户名称」列)
   customer_wechat     TEXT,                          -- 客户微信 ID/账号
   customer_needs      TEXT,                          -- 客户需求
-  customer_notes      TEXT,                          -- 客户备注
+  customer_notes      TEXT,                          -- 客户备注(仅存 SQLite,不同步表格)
   is_key_customer     INTEGER DEFAULT 0,             -- 是否是重点客户(0/1)
   visited_store       INTEGER DEFAULT 0,             -- 是否到店(0/1)
   owner_open_id       TEXT,                          -- 归属人 open_id
