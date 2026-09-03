@@ -17,8 +17,8 @@ export const config = {
    */
   HOST: process.env.HOST || '127.0.0.1',
   /**
-   * 管理页登录账号(单预设账号,非用户体系)。默认值只为开箱即用,
-   * 公网部署务必在 .env 改掉 KB_ADMIN_PASSWORD —— 默认口令启动会打告警。
+   * 管理页登录账号:预设 shengwei / 123456,开箱即用、无需配置。
+   * 仅当想换账号口令时才在 .env 覆盖(改完重启生效,所有旧会话自动失效)。
    */
   KB_ADMIN_USER: process.env.KB_ADMIN_USER || 'shengwei',
   KB_ADMIN_PASSWORD: process.env.KB_ADMIN_PASSWORD || '123456',

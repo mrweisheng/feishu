@@ -62,11 +62,6 @@ if (config.KB_ENABLED) {
   }
 }
 
-// 管理页单账号登录:默认口令只保开箱即用,公网部署(经 nginx 暴露)前必须改掉
-if (config.KB_ADMIN_PASSWORD === '123456') {
-  console.warn('⚠️ 管理页口令为默认值(123456),公网部署前请在 .env 中修改 KB_ADMIN_PASSWORD')
-}
-
 // 2. Mastra 端点(自动暴露 /api/agents/<id> 等)
 const mastraServer = new MastraServer({ app, mastra })
 await mastraServer.init()

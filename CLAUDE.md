@@ -116,7 +116,7 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 
 - `db/` — 持久化层。`index.ts` 单例连接 + schema + 幂等迁移(sqlite-vec 加载失败自动降级,不拖垮服务);`messages/reminders/customerLeads/knowledgeBase` 四个仓储,业务层零 SQL。
 - `ai/model.ts` — LLM 配置(Anthropic SDK 用于手写 tool-use loop,AI SDK 用于 Mastra agent,两者指向同一 MiniMax 端点)。
-- `config.ts` — 集中读 `.env`,缺必填项启动即抛错。`HOST` 默认 127.0.0.1(公网走 nginx 反代无需改);管理页单账号登录 `KB_ADMIN_USER/KB_ADMIN_PASSWORD`(默认 shengwei/123456,非用户体系)。
+- `config.ts` — 集中读 `.env`,缺必填项启动即抛错。`HOST` 默认 127.0.0.1(公网走 nginx 反代无需改);管理页预设账号登录 shengwei / 123456(想换才在 `.env` 覆盖 `KB_ADMIN_*`)。
 - `llm.ts` — @机器人问答入口 + 5 个工具实现 + `finalizeReply`(拼系统核对段)。
 - `llm/toolRegistry.ts` — **事实接管核心**(写工具登记表 / 系统核对段生成 / URL 清洗 / 去重归一化纯函数,有单测)。
 - `services/weather.ts` — `open-meteo` 封装(中文城市名→拼音兜底→剥行政区后缀,一次请求拿实时+多日)。
@@ -320,7 +320,7 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 | `FEISHU_APP_SECRET` | 是 | 飞书应用 App Secret |
 | `PORT` | 否 | HTTP 端口,默认 `4111` |
 | `HOST` | 否 | 监听网卡,默认 `127.0.0.1`(仅本机);公网访问走 nginx 反代(见 `deploy/nginx-knowledge.conf` + `deploy/部署指南.md`) |
-| `KB_ADMIN_USER` / `KB_ADMIN_PASSWORD` | 否 | 管理页登录账号/口令,默认 `shengwei` / `123456`(公网部署必须改口令,默认值启动会告警) |
+| `KB_ADMIN_USER` / `KB_ADMIN_PASSWORD` | 否 | 管理页登录账号/口令;不配置即用预设 `shengwei` / `123456`,想换时覆盖 |
 | `DB_PATH` | 否 | SQLite 路径(相对 server/),默认 `./data/messages.db` |
 | `ANTHROPIC_BASE_URL` | 是 | LLM 端点,指向 MiniMax(`.env.example` 默认 `https://api.minimaxi.com/anthropic`) |
 | `ANTHROPIC_API_KEY` | 是 | MiniMax API Key |
