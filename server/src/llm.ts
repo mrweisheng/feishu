@@ -1,10 +1,12 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { anthropic, modelName } from './ai/model.js'
+import { config } from './config.js'
 import { addReminder } from './db/reminders.js'
 import { addLead, getLeadById } from './db/customerLeads.js'
 import { syncLeadToBitable, listExistingNamesOnDate } from './feishu/bitable-customer.js'
 import { downloadMessageImage } from './feishu/media.js'
 import { getWeather, getWeatherForecast } from './services/weather.js'
+import { searchKnowledgeAsText } from './services/knowledge.js'
 import {
   type LedgerEntry,
   isWriteTool,
@@ -130,6 +132,21 @@ const RECORD_CUSTOMER_INFO_TOOL = {
   },
 }
 
+const SEARCH_KNOWLEDGE_TOOL = {
+  name: 'search_knowledge_base',
+  description: '搜索知识库。知识库是公司自己维护的资料(产品说明、业务流程、报价规则、常见问答、内部规定等)。当用户问的是这类"有标准答案、需要查资料"的问题时调用本工具,不要凭自己的印象回答。查到结果就基于结果回答并说明出自哪篇资料;查不到就直说知识库里没有,不要编。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      query: {
+        type: 'string',
+        description: '检索关键词或问题。用用户真正在问的核心词,不要照搬整句口语,也不要太长。',
+      },
+    },
+    required: ['query'],
+  },
+}
+
 export interface LlmContext {
   originalMessageId: string
   userOpenId: string
@@ -248,6 +265,24 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
       console.error('【天气预报查询失败】city=', city, 'msg:', err.message)
       record({ tool: name, category: 'read', ok: false, error: err.message })
       return JSON.stringify({ ok: false, error: `查询${city}天气预报失败:${err.message}` })
+    }
+  }
+  if (name === 'search_knowledge_base') {
+    const { query } = input as { query: string }
+    if (!query || !query.trim()) {
+      record({ tool: name, category: 'read', ok: false, error: '查询词为空' })
+      return JSON.stringify({ ok: false, error: '查询词不能为空' })
+    }
+    try {
+      // category='read':检索不产生副作用,不参与「事实接管」,
+      // 否则每条飞书回答后面都会被追加一段莫名其妙的系统核对。
+      const result = await searchKnowledgeAsText(query.trim())
+      record({ tool: name, category: 'read', ok: true })
+      return result
+    } catch (err: any) {
+      console.error('【知识库检索失败】query=', query, 'msg:', err.message)
+      record({ tool: name, category: 'read', ok: false, error: err.message })
+      return JSON.stringify({ ok: false, error: `知识库检索失败: ${err.message}` })
     }
   }
   if (name === 'record_customer_info') {
@@ -392,6 +427,10 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · 每条都调一次 record_customer_info(可以并行 8-10 个 tool_use block);lead_date 传当天 00:00:00 +08:00 的 ISO 字符串(YYYY-MM-DDTHH:mm:ss+08:00,工具内部会转);customer_name 传整段客户名称(上一条规则);is_key_customer 和 visited_store 都不传(默认 false);customer_wechat 图里有就填,没就空;customer_notes **只有用户明确说"备注:xxx""笔记:xxx""补充:xxx"时才填,别瞎编**(图片识别时一律不传)。
   · 录完用自然的话告诉用户(如"帮你登记啦,系统会核对条数贴在下面"),**不要自己数数、不要说"已登记 N 条"、不要贴链接** —— 条数和链接由系统核对段自动追加,你说了也会被覆盖/清洗。
   · 看 tool result 的 bitable_synced 字段:任一 false 就告诉用户"飞书表格同步失败,本地 SQLite 里有,需要排查",但具体几条成功以系统核对段为准。
+- 查询知识库:知识库是公司自己维护的资料(产品说明、业务流程、报价规则、常见问答、内部规定等),由同事在管理页录入,**不是群里的聊天记录**。当用户问的是这类"有标准答案、需要查资料"的问题(如"XX流程怎么走""XX多少钱""XX的规定是什么")时调用 search_knowledge_base。
+  · **查到结果**:基于结果回答,并说明出自哪篇资料(工具返回里有 source 字段)。不要把检索内容当自己知道的事,要说明是查到的。
+  · **查不到**:直接说"知识库里还没有这部分内容",**绝对不要凭印象编造**。可以补一句让同事去管理页补录。
+  · 知识库内容和群聊记录是两回事,用户问"群里谁说过什么"时不要用这个工具(那是消息归档,不是知识库)。
 其余问题正常闲聊回答即可。
 **全局铁律:你的回复里绝对不许出现任何 http(s) 网址/链接(URL)。** 链接一律由系统按真实成功结果从配置注入。你若需要提到表格,说"表格"即可,不要拼任何 URL。`
 
@@ -416,6 +455,8 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
         GET_WEATHER_TOOL,
         GET_WEATHER_FORECAST_TOOL,
         RECORD_CUSTOMER_INFO_TOOL,
+        // 知识库关闭时整个工具不下发,LLM 也就不会去调
+        ...(config.KB_ENABLED ? [SEARCH_KNOWLEDGE_TOOL] : []),
       ],
       messages,
     })

@@ -1,9 +1,39 @@
 import Database from 'better-sqlite3'
+import * as sqliteVec from 'sqlite-vec'
 import { config } from '../config.js'
+import { initKnowledgeBase } from './knowledgeBase.js'
 
 // 单例连接:WAL 模式,并发读写更稳。全模块共享同一个 db 句柄。
 export const db = new Database(config.DB_PATH)
 db.pragma('journal_mode = WAL')
+
+/**
+ * 加载 sqlite-vec 向量扩展(知识库用)。
+ *
+ * ⚠️ sqlite-vec 是 pre-v1(0.1.x),官方明确警告会有 breaking change,所以:
+ *   - 加载失败**绝不能拖垮整个服务** → 降级为「关键词检索可用、向量检索不可用」
+ *   - vec_chunks 表定位为**派生数据**(见 db/knowledgeBase.ts):最坏情况 DROP 重建即可,
+ *     正文(kb_chunks)和 FTS5 索引不受影响,知识库不会丢内容
+ */
+export const vecAvailable: boolean = ((): boolean => {
+  if (!config.KB_ENABLED) {
+    console.log('ℹ️ 知识库已关闭(KB_ENABLED=0),跳过 sqlite-vec 加载')
+    return false
+  }
+  try {
+    sqliteVec.load(db)
+    const row = db.prepare('SELECT vec_version() AS v').get() as { v: string }
+    console.log(`✅ sqlite-vec 已加载: ${row.v}`)
+    return true
+  } catch (err: any) {
+    console.error(
+      '⚠️ sqlite-vec 加载失败,向量检索不可用,知识库将降级为纯关键词检索。',
+      '正文与 FTS5 索引不受影响。原因:',
+      err.message
+    )
+    return false
+  }
+})()
 
 // ---- 建表 ----
 db.exec(`
@@ -98,3 +128,6 @@ if (!cols.some((c) => c.name === 'is_bot')) {
 }
 // is_bot 索引:老库迁移加列后建,新库列已在 CREATE TABLE 里(此句对所有库幂等)
 db.exec('CREATE INDEX IF NOT EXISTS idx_is_bot ON messages(is_bot)')
+
+// ---- 知识库建表(独立内容源,与 messages / customer_leads 无任何关联) ----
+initKnowledgeBase()

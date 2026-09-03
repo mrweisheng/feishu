@@ -4,14 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-飞书群机器人助手服务,围绕单进程后台构建,核心能力三块:
+飞书群机器人助手服务,围绕单进程后台构建,核心能力四块:
 
 1. **消息归档**:飞书群消息(实时 + 每 24h 历史补漏)落 SQLite,HTTP API 可分页查看
 2. **@机器人问答(LLM)**:基于 MiniMax(Anthropic SDK 兼容端点)的 tool-use loop,工具覆盖
-   ① 定时提醒 ② 天气查询(实时/多日预报) ③ **客资登记**(发微信联系人截图自动逐条录入,当前最重的能力)
+   ① 定时提醒 ② 天气查询(实时/多日预报) ③ **客资登记**(发微信联系人截图自动逐条录入,当前最重的能力) ④ 知识库检索
 3. **客资单向同步**:客资数据 best-effort 写飞书多维表格「客资信息登记表」作可视化副本(SQLite 是唯一事实源)
+4. **知识库(RAG)**:独立内容源(与消息归档/客资无关),经 `/admin` 管理页录入 → 中文切片 → bge-m3 向量 + FTS5 trigram 双路召回 → RRF 融合 → LLM 检索问答
 
-后台同时通过 `@mastra/hono` 暴露 Mastra agent 端点。**纯后台,无前端**(web 已移除)。
+后台同时通过 `@mastra/hono` 暴露 Mastra agent 端点。除知识库管理页(`web/index.html`,单文件零构建)外无其他前端。
 
 ## 架构
 
@@ -20,13 +21,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
                       │  │                     │
                       │  ├── Hono HTTP API ◀──┘  (读 SQLite)
                       │  │    ├── /api/messages            (分页消息)
-                      │  │    └── /api/customer-leads      (分页客资)
+                      │  │    ├── /api/customer-leads      (分页客资)
+                      │  │    └── /api/knowledge           (知识库管理,登录鉴权)
+                      │  │
+                      │  ├── /admin 知识库管理页(单文件 HTML,登录鉴权;公网经 nginx:knowledge.eazycar.top)
                       │  │
                       │  ├── Mastra agent 端点(/api/agents/summary-agent)
                       │  │
                       │  ├── @机器人 LLM(tool-use loop,最多 3 轮)
                       │  │    ├── set_reminder / get_weather / get_weather_forecast
-                      │  │    └── record_customer_info  ──best-effort──▶ 飞书「客资信息登记表」
+                      │  │    ├── record_customer_info  ──best-effort──▶ 飞书「客资信息登记表」
+                      │  │    └── search_knowledge_base ─▶ 混合检索(向量+BM25→RRF)
                       │  │
                       │  ├── 提醒调度器(动态 setTimeout + 10min 兜底轮询 + 重启补偿)
                       │  │
@@ -40,17 +45,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-# 后台开发(tsx 热重载)
+# 后台开发(tsx 热重载) / 构建生产 / 启动
 cd server && npm run dev
-
-# 后台构建/生产启动
 cd server && npm run build && npm start
 
 # 单测(node:test + tsx,零额外依赖)
 cd server && npm test
+
+# 跑单个测试文件(快速迭代)
+cd server && node --test --import tsx tests/toolRegistry.test.ts
+
+# 跑单个测试用例(npm test 加 -t <pattern> 即可)
+cd server && npm test -- -t "stripAllUrls"
 ```
 
 首次运行需要 `cp server/.env.example server/.env` 并填入飞书应用凭证 + MiniMax API Key。客资多维表格相关变量可选(留空则客资只入 SQLite,不同步飞书表格)。
+
+> **不要主动 `npm run dev`**——服务启动后会占端口、跑长连接;验证由用户自己启动,改完代码让用户跑。
+
+## 探索代码
+
+`mcp__codegraph__codegraph_explore` 是已索引的代码库搜索,**优先用**它来回答「X 怎么工作」「X 在哪里」「X 被谁调用」类问题,而不是 Read + Grep 自己搜。CodeGraph 一次返回带行号的源 + 调用链,比手动 Read 节省大量 token,且对即将修改的代码能看到 blast radius。
+
+Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这类纯文档、读完整长文件做深度编辑。
 
 ## 技术栈
 
@@ -95,26 +112,22 @@ cd server && npm test
 
 ## 代码组织
 
-- `db/`:持久化层。`db/index.ts` 单例连接(WAL)+ 建表 schema + 幂等增量迁移,各仓储全部预编译语句,业务层零 SQL。
-  - `db/messages.ts` - 消息/提及(实时 + 历史),`saveMessage` 事务包裹 message+mentions,`getMessageById` 供补录模式读父消息
-  - `db/reminders.ts` - 定时提醒 CRUD + `getEarliestPendingReminder`(动态定时器用)+ `expireOverdueReminders`(重启补偿丢弃)
-  - `db/customerLeads.ts` - 客资 CRUD + `addLead`(DB 层兜底剥日期前缀 + notes 兜底)+ 软删 + 分页查询
-- `ai/model.ts`:统一 LLM 配置,导出 `anthropic`(Anthropic SDK 客户端,timeout 60s/maxRetries 2,用于 `llm.ts` 手写 tool-use loop)、`model`(AI SDK LanguageModel,用于 Mastra agent)、`modelName`。
-- `config.ts`:集中读 `.env`,导出 `config`,所有缺失必填项启动即抛错。
-- `llm.ts`:@机器人问答入口 + 4 个工具的实现逻辑(set_reminder / get_weather / get_weather_forecast / record_customer_info)+ 事实接管 `finalizeReply`。
-- `llm/toolRegistry.ts`:**事实接管核心**--写工具登记表 + 「系统核对」段生成 + URL 清洗 + 去重归一化纯函数(有单测)。
-- `services/weather.ts` - `open-meteo` 免费、无 key;城市识别中文名->拼音兜底->剥行政区后缀;一次请求拿实时+多日预报;WMO 天气码映射中文。
-- `feishu/`:
-  - `client.ts` - `apiClient`(主动调飞书接口)+ `wsClient`(长连接收事件)
-  - `handler.ts` - 消息事件入口、机器人 open_id(重试+懒加载自愈)、@问答路由、补录模式、worker 启动、用户姓名缓存、重复消息早退、ACK 异步化
-  - `history.ts` - 历史补漏,目标=机器人所在群(API 实时拉,失败回退库中已知),5 分钟重叠窗口,补名字按 open_id 去重
-  - `messages.ts` - `replyMessage`(引用回复原消息)
-  - `media.ts` - `downloadMessageImage`:`im.messageResource.get` 下载消息原图 + `sharp` 压缩(长边≤1568、JPEG q90、<200KB 跳过、EXIF 自动旋正),喂 LLM 视觉识别
-  - `reminders.ts` - 提醒调度器(动态 setTimeout + 10min 兜底轮询 + 重启补偿)
-  - `bitable-customer.ts` - **客资单向同步**(正向写入 + 字段映射 + 去重预拉 `listExistingNamesOnDate`)
-- `routes/` - HTTP 路由(messages / customerLeads)
-- `mastra/` - Mastra 智能体定义
-- `tests/toolRegistry.test.ts` - 事实接管 + 去重归一化的纯函数单测
+按职责分(具体文件用 CodeGraph 或 `ls` 探):
+
+- `db/` — 持久化层。`index.ts` 单例连接 + schema + 幂等迁移(sqlite-vec 加载失败自动降级,不拖垮服务);`messages/reminders/customerLeads/knowledgeBase` 四个仓储,业务层零 SQL。
+- `ai/model.ts` — LLM 配置(Anthropic SDK 用于手写 tool-use loop,AI SDK 用于 Mastra agent,两者指向同一 MiniMax 端点)。
+- `config.ts` — 集中读 `.env`,缺必填项启动即抛错。`HOST` 默认 127.0.0.1(公网走 nginx 反代无需改);管理页单账号登录 `KB_ADMIN_USER/KB_ADMIN_PASSWORD`(默认 shengwei/123456,非用户体系)。
+- `llm.ts` — @机器人问答入口 + 5 个工具实现 + `finalizeReply`(拼系统核对段)。
+- `llm/toolRegistry.ts` — **事实接管核心**(写工具登记表 / 系统核对段生成 / URL 清洗 / 去重归一化纯函数,有单测)。
+- `services/weather.ts` — `open-meteo` 封装(中文城市名→拼音兜底→剥行政区后缀,一次请求拿实时+多日)。
+- `services/knowledge.ts` — 知识库服务层:异步串行索引队列(状态机 pending→indexing→ready/failed/stale)+ 混合检索(向量 + BM25 → RRF)。启动自检失败跳过对账,防瞬时故障把全库钉死在 failed。
+- `services/embedding.ts` — OpenAI 兼容嵌入客户端(provider adapter,分批 + 限并发 + 指数退避 + 维度自检);`chunker.ts` 中文特化递归切片;`ftsQuery.ts` / `rank.ts` 纯函数(trigram 滑窗 MATCH 构造 / RRF,有单测)。
+- `feishu/` — 飞书 SDK 封装:`client`(apiClient + wsClient)/ `handler`(消息事件 + worker 启动 + ACK 异步化)/ `history`(24h 历史补漏)/ `messages`(reply)/ `media`(图片下载压缩)/ `reminders`(调度器)/ `bitable-customer`(客资单向同步)。
+- `routes/` — Hono HTTP 路由(messages / customerLeads / knowledge),挂到 `/api`;knowledgeBase 内含单账号登录(/login /logout /session)+ 会话中间件。
+- `services/auth.ts` — 管理端登录鉴权:凭证校验 + HMAC 会话签名/校验 + 登录限流(纯函数,有单测)。
+- `web/index.html` — 知识库管理页(单文件零构建,挂 `/admin`,含登录界面,按会话切换登录/应用视图)。
+- `mastra/` — Mastra agent 定义。
+- `tests/toolRegistry.test.ts`、`tests/knowledge.test.ts` — `node:test` 单测,覆盖事实接管、去重归一化、切片、FTS 查询构造、RRF。
 
 ## LLM 工具系统(`llm.ts`)
 
@@ -127,7 +140,7 @@ cd server && npm test
 - **图片直接进 LLM 视觉**:联系人截图经 `buildUserContent` 下载压缩后作为 `image` block 喂给 LLM 识别(客资场景的核心输入);文字可空(纯图 @机器人也能触发登记)
 - **失败兜底**:LLM 报错时回复"开小差了,稍后再试";`askLLM` 工具调用用尽 3 轮兜底"处理超时,请重试"
 
-### 工具清单(共 4 个)
+### 工具清单(共 5 个)
 
 | 工具 | 用途 | 入库目标 |
 |---|---|---|
@@ -135,6 +148,9 @@ cd server && npm test
 | `get_weather` | 查某城市当前实时或某一个具体日期的天气 | 不入库,直接调 open-meteo |
 | `get_weather_forecast` | 一次性查未来多天逐日预报(最多3天) | 不入库,直接调 open-meteo |
 | `record_customer_info` | 登记一条客资(销售线索) | `customer_leads` 表 + best-effort 同步飞书表格 |
+| `search_knowledge_base` | 检索公司知识库(`KB_ENABLED=0` 时整个工具不下发) | 不入库,只读 `kb_chunks` |
+
+`search_knowledge_base` 是**读工具**(category='read'),不参与事实接管——否则每条回答都会被追加莫名其妙的系统核对段。系统 prompt 要求:查到就基于结果回答并说明出处;查不到就直说没有,**绝不编造**。
 
 ### 事实接管(`llm/toolRegistry.ts`)-- 核心设计
 
@@ -183,6 +199,21 @@ cd server && npm test
 3. 表格返回的 `record_id` 写回 SQLite `customer_leads.feishu_record_id`
 4. **best-effort**:失败仅记日志,不影响 SQLite(事实源)
 5. **去重预拉**:`listExistingNamesOnDate` 用 filter `ExactDate` 拉当日已有记录(page_size 500),供录入前查重;未启用或拉取失败返回空 Set(降级为不去重,靠人工清)
+
+## 知识库(RAG)
+
+独立内容源:**只能通过 `/admin` 管理页录入**,与消息归档、客资表零关联。链路:录入 → 中文切片 → bge-m3 嵌入 → sqlite-vec + FTS5 双索引 → 混合检索 → `search_knowledge_base` 工具。
+
+### 关键设计
+
+- **事实源 vs 派生数据**:`kb_docs`(原文)+ `kb_chunks`(切片)+ `kb_chunks_fts`(FTS5 外部内容表)是事实源;`vec_chunks`(sqlite-vec)是**可随时 DROP 重建的派生表**。sqlite-vec 是 pre-v1 扩展,加载失败只降级为纯关键词检索,不拖垮服务
+- **维度绑定模型**:vec0 建表维度写死,启动时检测配置维度变化 → DROP 重建 + ready 文档标 stale;嵌入响应维度与配置不符直接抛错(换模型必须同步改 `EMBEDDING_DIM`,自检失败不拒绝启动,降级 + 告警 + 跳过对账)
+- **文档状态机**:`pending → indexing → ready / failed`;换模型后 `ready → stale`。启动对账只重跑 pending/indexing/stale,且**自检通过才对账**——否则一次瞬时故障会把全库钉死在 failed
+- **索引队列串行**:嵌入打外部 API 有 RPM 限流,并发只会吃 429;失败标 failed 带错误原因,管理页可看可手动重试
+- **混合检索**:向量(同义表述)+ BM25(专有名词/合同号精确匹配)各召回 N 条 → RRF 融合(只用排名不看分数,免调参)→ topK,只返回 `status='ready'` 的文档
+- **FTS5 trigram 两条硬约束**(写查询前必看):连续汉字串是一整个 phrase(等于精确子串匹配,自然语句零召回)→ 长汉字串切 3 字滑动窗口 OR;最小匹配长度 3(2 字片段必然空)
+- **BigInt 主键**:vec0 的 INTEGER PRIMARY KEY 必须绑 BigInt,JS number 会被绑成 REAL 直接报错
+- **鉴权**(services/auth.ts):单预设账号登录,会话 = 无状态 HMAC cookie(`用户名.过期时间.签名`,密钥由 app secret + 账号口令派生 → 改口令即时全端下线、进程重启不掉线,7 天有效);凭证与签名全走 sha256 定长摘要 + timingSafeEqual 防计时攻击;登录连错 5 次按 IP(X-Real-IP,nginx 传入)锁 2 分钟。登录/探测/登出路由注册在 requireLogin 中间件**之前**(Hono 按注册顺序执行,先命中的 handler 直接返回不会落入鉴权);`/admin` 页面本身无数据不做服务端拦截,前端探测 /session 切换登录视图
 
 ## 提醒调度器(`feishu/reminders.ts`)
 
@@ -288,6 +319,8 @@ cd server && npm test
 | `FEISHU_APP_ID` | 是 | 飞书应用 App ID |
 | `FEISHU_APP_SECRET` | 是 | 飞书应用 App Secret |
 | `PORT` | 否 | HTTP 端口,默认 `4111` |
+| `HOST` | 否 | 监听网卡,默认 `127.0.0.1`(仅本机);公网访问走 nginx 反代(见 `deploy/nginx-knowledge.conf` + `deploy/部署指南.md`) |
+| `KB_ADMIN_USER` / `KB_ADMIN_PASSWORD` | 否 | 管理页登录账号/口令,默认 `shengwei` / `123456`(公网部署必须改口令,默认值启动会告警) |
 | `DB_PATH` | 否 | SQLite 路径(相对 server/),默认 `./data/messages.db` |
 | `ANTHROPIC_BASE_URL` | 是 | LLM 端点,指向 MiniMax(`.env.example` 默认 `https://api.minimaxi.com/anthropic`) |
 | `ANTHROPIC_API_KEY` | 是 | MiniMax API Key |
@@ -296,6 +329,11 @@ cd server && npm test
 | `BITABLE_CUSTOMER_TABLE_ID` | 否 | 客资多维表格 table_id |
 | `BITABLE_CUSTOMER_LINK` | 否 | 客资表格链接(登记成功后「系统核对」段附上) |
 | `REMINDER_RESEND_WINDOW_MS` | 否 | 提醒重启补偿窗口(毫秒,默认 1800000=30min):重启后过期但 < 该窗口的提醒补发,>= 的丢弃 |
+| `KB_ENABLED` | 否 | 知识库总开关,`0` 关闭(不加载 sqlite-vec、不下发检索工具),默认开 |
+| `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` / `EMBEDDING_DIM` | 否* | 嵌入端点(OpenAI 兼容 `/v1/embeddings`),默认硅基流动 `BAAI/bge-m3` 1024 维;*开知识库且要向量检索则 KEY 必填,缺了降级为纯关键词检索 |
+| `KB_CHUNK_SIZE` / `KB_CHUNK_OVERLAP` | 否 | 切片目标字符数 / 重叠,默认 400 / 60 |
+| `KB_EMBED_CONCURRENCY` | 否 | 嵌入并发上限,默认 2(免费档限流,开大吃 429) |
+| `KB_SEARCH_CANDIDATES` / `KB_SEARCH_TOP_K` | 否 | 检索双路各召回候选数 / 融合后返回条数,默认 20 / 5 |
 
 ## 飞书应用权限
 
@@ -322,7 +360,9 @@ cd server && npm test
 
 ## 测试
 
-`server/tests/toolRegistry.test.ts` 用 `node:test` + `tsx`,零额外测试依赖,`npm test` 运行。覆盖事实接管与去重归一化的纯函数:
+`server/tests/` 用 `node:test` + `tsx`,零额外测试依赖,`npm test` 运行。
+
+### toolRegistry.test.ts(事实接管与去重归一化)
 
 - `stripAllUrls`:伪造 feishu.cn 链接、多链接、markdown 包裹均全清;无链接原样保留
 - `buildSystemAttestation`:0 条写工具不追加 / 读工具不追加 / 账本空+LLM 声称成功->戳穿 / 全成功->真实条数+名字+唯一链接 / 部分成功->列成功+失败数 / 全失败->"实际未成功" / 去重跳过单独报告 / set_reminder 不贴链接 / 多工具混合各自报告
@@ -330,4 +370,15 @@ cd server && npm test
 - `dateKeyShanghai`:同一天不同时刻同 key / 跨零点不同 key / UTC 时间戳按北京时间归日
 - `stripDatePrefix`:剥"60717/雅琴"->"雅琴"等;纯数字名"3"不剥;去重口径一致性(带前缀与纯名归一后相等)
 
-> 测试文件顶部先注入测试用环境变量再动态 `import()` 被测模块(因 `toolRegistry.ts` 顶部 import `config.ts`,后者在校验 .env 时会抛错)。
+### knowledge.test.ts(知识库纯函数)
+
+- `chunkText`:空内容零切片 / 短文本原样 / 按句号切不硬切字符 / overlap 不丢内容 / size=0 下限保护不死循环
+- `buildFtsQuery`:长中文句切 3 字滑窗 / 2 字查询返回 null / 合同号整体保留不切碎 / 标点当分隔符 / 条数上限 + 去重
+- `reciprocalRankFusion`:两路都命中的排最前 / 分数符合 1/(k+rank) / 空输入
+
+### auth.test.ts(管理端登录鉴权)
+
+- `verifyCredentials`:账号口令全对才通过 / 大小写敏感 / 尾随空格不原谅
+- `verifySession`:签名往返 / 空与乱格式拒绝 / 过期拒绝 / 篡改签名、用户名、过期时间一律拒绝 / 签名合法但用户名与配置不符(改名后旧会话作废)
+
+> 测试文件顶部先注入测试用环境变量再动态 `import()` 被测模块(因 `toolRegistry.ts` 顶部 import `config.ts`,后者在校验 .env 时会抛错)。`knowledge.test.ts` 只测纯函数模块(ftsQuery/rank/chunker),不碰 config 与 SQLite。

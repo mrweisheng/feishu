@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识库管理</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --border: #e3e6ea;
+    --text: #1f2329;
+    --muted: #8a9099;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --danger: #dc2626;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --info: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; margin-bottom: 18px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 14px; font-weight: 600; }
+
+  /* 统计条 */
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; }
+  .stat {
+    flex: 1; min-width: 108px; background: #fafbfc;
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  }
+  .stat .n { font-size: 20px; font-weight: 600; }
+  .stat .l { font-size: 12px; color: var(--muted); }
+  .stat.ok .n { color: var(--ok); }
+  .stat.bad .n { color: var(--danger); }
+  .stat.warn .n { color: var(--warn); }
+
+  /* 表单 */
+  label { display: block; font-size: 13px; margin-bottom: 5px; font-weight: 500; }
+  input[type=text], input[type=password], textarea {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--border);
+    border-radius: 7px; font: inherit; background: #fff; color: var(--text);
+  }
+  input[type=text]:focus, input[type=password]:focus, textarea:focus { outline: none; border-color: var(--primary); }
+  textarea { resize: vertical; min-height: 150px; font-family: inherit; }
+  .row { margin-bottom: 12px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
+
+  button {
+    padding: 8px 16px; border: none; border-radius: 7px;
+    background: var(--primary); color: #fff; font: inherit; cursor: pointer;
+  }
+  button:hover { background: var(--primary-hover); }
+  button:disabled { background: #c7cbd1; cursor: not-allowed; }
+  button.ghost { background: #fff; color: var(--text); border: 1px solid var(--border); }
+  button.ghost:hover { background: #f3f4f6; }
+  button.danger { background: #fff; color: var(--danger); border: 1px solid #f3c7c7; }
+  button.danger:hover { background: #fef2f2; }
+  button.sm { padding: 4px 10px; font-size: 12px; }
+
+  /* 列表 */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { font-size: 12px; color: var(--muted); font-weight: 500; }
+  td.title { max-width: 340px; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 20px;
+    font-size: 12px; line-height: 18px;
+  }
+  .b-ready { background: #dcfce7; color: #15803d; }
+  .b-pending, .b-indexing { background: #e5e7eb; color: #4b5563; }
+  .b-failed { background: #fee2e2; color: #b91c1c; }
+  .b-stale { background: #fef3c7; color: #b45309; }
+  .err { color: var(--danger); font-size: 12px; }
+  .empty { color: var(--muted); text-align: center; padding: 26px; }
+
+  /* 搜索结果 */
+  .hit { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; background: #fafbfc; }
+  .hit-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  .hit-title { font-weight: 600; }
+  .hit-meta { font-size: 12px; color: var(--muted); }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 4px; background: #e0e7ff; color: #3730a3; }
+  .tag.fts { background: #dcfce7; color: #15803d; }
+  .hit-text { white-space: pre-wrap; font-size: 13px; color: #374151; }
+
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .toolbar input { flex: 1; min-width: 200px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; }
+  .msg { padding: 9px 12px; border-radius: 7px; margin-bottom: 12px; font-size: 13px; display: none; }
+  .msg.show { display: block; }
+  .msg.ok { background: #dcfce7; color: #15803d; }
+  .msg.err { background: #fee2e2; color: #b91c1c; }
+  dialog { border: none; border-radius: 10px; padding: 0; max-width: 780px; width: 92%; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  .dlg-body { padding: 18px; max-height: 72vh; overflow: auto; }
+  .dlg-head { padding: 14px 18px; border-bottom: 1px solid var(--border); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+</style>
+</head>
+<body>
+<!-- 登录视图:未登录 / 会话过期时显示 -->
+<div id="loginView" class="card" style="max-width:360px;margin:60px auto;display:none">
+  <h2 style="text-align:center">知识库管理</h2>
+  <div class="row">
+    <label for="loginUser">账号</label>
+    <input type="text" id="loginUser" autocomplete="username" placeholder="账号">
+  </div>
+  <div class="row">
+    <label for="loginPass">密码</label>
+    <input type="password" id="loginPass" autocomplete="current-password" placeholder="密码">
+  </div>
+  <button id="loginBtn" style="width:100%">登录</button>
+  <div class="msg" id="loginMsg"></div>
+</div>
+
+<!-- 应用视图:登录成功后显示 -->
+<div id="appView" style="display:none">
+<div class="wrap">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+    <h1>知识库管理</h1>
+    <div style="flex-shrink:0">
+      <span id="who" style="color:var(--muted);font-size:13px;margin-right:10px"></span><button id="logoutBtn" class="ghost sm">退出登录</button>
+    </div>
+  </div>
+  <div class="sub">知识库是独立内容源,只有在这里录入的内容才会被索引和检索(与飞书群消息、客资表无关)。</div>
+
+  <div class="card">
+    <h2>概览</h2>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>录入文档</h2>
+    <div class="row">
+      <label for="title">标题</label>
+      <input type="text" id="title" placeholder="如:车辆报价流程说明">
+    </div>
+    <div class="row">
+      <label for="content">内容</label>
+      <textarea id="content" placeholder="粘贴或输入正文。系统会先切成语义完整的片段,再生成向量和关键词索引。"></textarea>
+      <div class="hint">录入后自动进入索引队列,状态从「待索引」变成「已就绪」即可被检索。</div>
+    </div>
+    <button id="submit">录入并索引</button>
+    <div class="msg" id="formMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>文档列表</h2>
+    <div id="list"></div>
+  </div>
+
+  <div class="card">
+    <h2>检索测试</h2>
+    <div class="toolbar">
+      <input type="text" id="q" placeholder="输入问题或关键词,验证检索效果">
+      <button id="search">搜索</button>
+    </div>
+    <div id="results"></div>
+  </div>
+</div>
+</div><!-- /appView -->
+
+<dialog id="dlg">
+  <div class="dlg-head">
+    <span id="dlgTitle"></span>
+    <button class="ghost sm" onclick="document.getElementById('dlg').close()">关闭</button>
+  </div>
+  <div class="dlg-body" id="dlgBody"></div>
+</dialog>
+
+<script>
+const API = '/api/knowledge'
+const STATUS_LABEL = { ready: '已就绪', pending: '待索引', indexing: '索引中', failed: '失败', stale: '待重建' }
+
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+const fmtTime = (ms) => new Date(ms).toLocaleString('zh-CN', { hour12: false })
+
+// 登录鉴权:会话是 HttpOnly cookie(服务端 /api/knowledge/login 下发),同源 fetch 自动携带。
+// 页面先探测 /session:未登录显示登录框,已登录直接进应用。
+async function api(url, opts = {}) {
+  const res = await fetch(url, opts)
+  if (res.status === 401) {
+    // 会话过期(7 天)或未登录:切回登录视图,当前操作以报错收场由各调用方 catch
+    showLogin()
+    throw new Error('未登录或会话已过期')
+  }
+  return res
+}
+
+function showLogin() {
+  $('loginView').style.display = ''
+  $('appView').style.display = 'none'
+}
+function enterApp(username) {
+  $('who').textContent = username ? `@${username}` : ''
+  $('loginView').style.display = 'none'
+  $('appView').style.display = ''
+  loadAll()
+}
+
+async function probeSession() {
+  try {
+    const res = await fetch(`${API}/session`)
+    if (res.ok) {
+      const d = await res.json()
+      enterApp(d.username)
+      return
+    }
+  } catch { /* 网络异常当未登录处理 */ }
+  showLogin()
+}
+
+async function doLogin() {
+  const username = $('loginUser').value.trim()
+  const password = $('loginPass').value
+  if (!username || !password) return showMsg($('loginMsg'), '请输入账号和密码', false)
+  $('loginBtn').disabled = true
+  $('loginBtn').textContent = '登录中...'
+  try {
+    const res = await fetch(`${API}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || '登录失败')
+    $('loginPass').value = ''
+    $('loginMsg').className = 'msg'
+    enterApp(username)
+  } catch (e) {
+    showMsg($('loginMsg'), e.message, false)
+  } finally {
+    $('loginBtn').disabled = false
+    $('loginBtn').textContent = '登录'
+  }
+}
+
+$('loginBtn').onclick = doLogin
+$('loginPass').onkeydown = (e) => { if (e.key === 'Enter') doLogin() }
+$('loginUser').onkeydown = (e) => { if (e.key === 'Enter') $('loginPass').focus() }
+$('logoutBtn').onclick = async () => {
+  await fetch(`${API}/logout`, { method: 'POST' }).catch(() => {})
+  showLogin()
+}
+
+function showMsg(el, text, ok) {
+  el.textContent = text
+  el.className = 'msg show ' + (ok ? 'ok' : 'err')
+  setTimeout(() => { el.className = 'msg' }, 4000)
+}
+
+let pollTimer = null
+
+async function loadStats() {
+  try {
+    const s = await (await api(`${API}/stats`)).json()
+    $('stats').innerHTML = `
+      <div class="stat"><div class="n">${s.docs}</div><div class="l">文档</div></div>
+      <div class="stat"><div class="n">${s.chunks}</div><div class="l">切片</div></div>
+      <div class="stat ok"><div class="n">${s.ready}</div><div class="l">已就绪</div></div>
+      <div class="stat warn"><div class="n">${(s.pending || 0) + (s.indexing || 0)}</div><div class="l">处理中</div></div>
+      <div class="stat warn"><div class="n">${s.stale}</div><div class="l">待重建</div></div>
+      <div class="stat bad"><div class="n">${s.failed}</div><div class="l">失败</div></div>
+      <div class="stat"><div class="n" style="font-size:14px">${esc(s.model)}</div><div class="l">${s.dim} 维 · 向量${s.vecReady ? '可用' : '不可用(纯关键词)'}</div></div>
+    `
+  } catch (e) {
+    $('stats').innerHTML = `<div class="stat"><div class="l">加载失败:${esc(e.message)}</div></div>`
+  }
+}
+
+async function loadList() {
+  try {
+    const data = await (await api(`${API}/docs?limit=100`)).json()
+    const items = data.items || []
+    if (!items.length) {
+      $('list').innerHTML = '<div class="empty">还没有文档,先在上面录入一篇。</div>'
+      return
+    }
+    $('list').innerHTML = `
+      <table>
+        <thead><tr><th>标题</th><th>状态</th><th>切片</th><th>录入时间</th><th>操作</th></tr></thead>
+        <tbody>
+        ${items.map((d) => `
+          <tr>
+            <td class="title">${esc(d.title)}${d.error ? `<div class="err">${esc(d.error)}</div>` : ''}</td>
+            <td><span class="badge b-${esc(d.status)}">${STATUS_LABEL[d.status] || d.status}</span></td>
+            <td>${d.chunk_count}</td>
+            <td>${fmtTime(d.created_at)}</td>
+            <td>
+              <button class="ghost sm" onclick="viewDoc(${d.id})">查看</button>
+              <button class="ghost sm" onclick="reindex(${d.id})">重建</button>
+              <button class="danger sm" onclick="del(${d.id})">删除</button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`
+    // 有待处理/失败的文档时轮询,直到全部稳定
+    const busy = items.some((d) => d.status === 'pending' || d.status === 'indexing')
+    if (busy) {
+      clearTimeout(pollTimer)
+      pollTimer = setTimeout(loadAll, 2500)
+    }
+  } catch (e) {
+    $('list').innerHTML = `<div class="empty">加载失败:${esc(e.message)}</div>`
+  }
+}
+
+function loadAll() { loadStats(); loadList() }
+
+$('submit').onclick = async () => {
+  const title = $('title').value.trim()
+  const content = $('content').value.trim()
+  if (!title || !content) return showMsg($('formMsg'), '标题和内容都不能为空', false)
+  $('submit').disabled = true
+  $('submit').textContent = '提交中...'
+  try {
+    const res = await api(`${API}/docs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, content }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '提交失败')
+    $('title').value = ''
+    $('content').value = ''
+    showMsg($('formMsg'), `已录入 #${data.id},正在后台索引`, true)
+    loadAll()
+  } catch (e) {
+    showMsg($('formMsg'), e.message, false)
+  } finally {
+    $('submit').disabled = false
+    $('submit').textContent = '录入并索引'
+  }
+}
+
+async function viewDoc(id) {
+  try {
+    const res = await api(`${API}/docs/${id}`)
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(d.error || `HTTP ${res.status}`)
+    $('dlgTitle').textContent = d.title
+    $('dlgBody').innerHTML = `
+      <div class="hint" style="margin-bottom:10px">状态 ${STATUS_LABEL[d.status] || d.status} · ${d.chunk_count} 个切片${d.error ? ' · 错误:' + esc(d.error) : ''}</div>
+      ${(d.chunks || []).map((c) => `
+        <div class="hit">
+          <div class="hit-head"><span class="tag">#${c.seq + 1}</span></div>
+          <div class="hit-text">${esc(c.text)}</div>
+        </div>`).join('') || '<div class="empty">还没有切片</div>'}`
+    $('dlg').showModal()
+  } catch (e) {
+    alert(`查看文档失败:${e.message}`)
+  }
+}
+
+async function reindex(id) {
+  try {
+    const res = await api(`${API}/docs/${id}/reindex`, { method: 'POST' })
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`)
+    loadAll()
+  } catch (e) {
+    alert(`重建失败:${e.message}`)
+  }
+}
+
+async function del(id) {
+  if (!confirm('确定删除这篇文档?切片和向量会一并清除,原文不可恢复。')) return
+  try {
+    const res = await api(`${API}/docs/${id}`, { method: 'DELETE' })
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`)
+    loadAll()
+  } catch (e) {
+    alert(`删除失败:${e.message}`)
+  }
+}
+
+$('search').onclick = doSearch
+$('q').onkeydown = (e) => { if (e.key === 'Enter') doSearch() }
+
+async function doSearch() {
+  const q = $('q').value.trim()
+  if (!q) return
+  $('results').innerHTML = '<div class="empty">检索中...</div>'
+  try {
+    const res = await api(`${API}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, topK: 5 }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || '检索失败')
+    if (!data.found) {
+      $('results').innerHTML = `<div class="empty">没找到相关内容(${data.tookMs}ms)</div>`
+      return
+    }
+    $('results').innerHTML = `
+      <div class="hint" style="margin-bottom:10px">命中 ${data.found} 条 · ${data.tookMs}ms · 向量${data.vecReady ? ' + 关键词' : '不可用,仅关键词'}</div>
+      ${data.results.map((r) => `
+        <div class="hit">
+          <div class="hit-head">
+            <span class="hit-title">${esc(r.docTitle)}</span>
+            ${r.via.map((v) => `<span class="tag ${v}">${v === 'vec' ? '向量' : '关键词'}</span>`).join('')}
+            <span class="hit-meta">融合分 ${r.score}</span>
+          </div>
+          <div class="hit-text">${esc(r.text)}</div>
+        </div>`).join('')}`
+  } catch (e) {
+    $('results').innerHTML = `<div class="empty">检索失败:${esc(e.message)}</div>`
+  }
+}
+
+probeSession()
+</script>
+</body>
+</html>
