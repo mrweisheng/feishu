@@ -18,7 +18,6 @@ import {
   normalizeName,
   stripDatePrefix,
   dateKeyShanghai,
-  CLAIMS_PLATES,
 } from './llm/toolRegistry.js'
 
 // 当前时间字符串(Asia/Shanghai),注入 system prompt 让 LLM 有时间观念
@@ -584,9 +583,6 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   // 之后所有 record_customer_info 共用这一份(批量场景一次拉取比对 N 次,不打 N 次接口)。
   let dedup: DedupCtx | null = null
 
-  // 靓号假出图纠偏只允许触发一轮(防循环)
-  let platesRetryUsed = false
-
   for (let i = 0; i < 3; i++) {
     const res = await anthropic.messages.create({
       model: modelName,
@@ -651,27 +647,8 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
     if (!text) {
       console.error('【LLM 警告】返回无 text 内容,stop_reason:', res.stop_reason, '原始 content:', JSON.stringify(res.content))
     }
-
-    // 靓号假出图纠偏(2026-09-15 线上事故的代码级保险):模型挑完号在文字里宣布"已生成海报",
-    // 但账本里没有 generate_daily_plates 记录 = 根本没调工具,用户会等一张永远不来的图。
-    // 检测到就追加纠偏消息强制它真调一次(只重试一轮,防止无限循环)。
-    const platesCalled = ledger.some((e) => e.tool === 'generate_daily_plates')
-    if (!platesCalled && text && CLAIMS_PLATES.test(text)) {
-      if (!platesRetryUsed) {
-        platesRetryUsed = true
-        console.warn('⚠️ 检测到靓号假出图(未调工具却宣布出图),自动纠偏重试一轮')
-        messages.push({ role: 'assistant', content: res.content })
-        messages.push({
-          role: 'user',
-          content: [{
-            type: 'text',
-            text: '你刚才并没有真正调用 generate_daily_plates 工具——海报图只能由该工具渲染并发送到群里,你自己的文字发不出图。请现在立即调用 generate_daily_plates:port 传你识别的口岸,plates 传清单里的全部候选车牌,picks 传你刚精选的 2 个号。工具执行成功后再用一两句话介绍精选理由。',
-          }],
-        })
-        continue
-      }
-      // 纠偏一轮后还在谎:降级为诚实话术,不让用户继续等图
-      return finalizeReply('靓号我挑好了,但出图环节没有成功,请把清单再发一次或稍后再试 🙏', ledger)
+    if (text && res.stop_reason !== 'end_turn') {
+      console.warn('【LLM 提示】stop_reason=', res.stop_reason, '(非 end_turn,若是 max_tokens 说明输出预算不够,检查 LLM_MAX_TOKENS)')
     }
 
     return finalizeReply(text, ledger)

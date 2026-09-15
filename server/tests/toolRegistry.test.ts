@@ -270,49 +270,7 @@ test('事实接管:本批全部重复 → 明确告知"全部与已有重复"', 
   assert.ok(!out.includes(REAL_CUSTOMER_LINK), '全跳过时绝不贴链接')
 })
 
-test('事实接管:LLM 嘴上说"生成出图"但账本无写工具 → 戳穿靓号假出图', async () => {
-  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
-  // 线上真实话术
-  const llmText = '精選這兩個…完整靚號卡幫你生成出圖啦 ⬇️'
-  const out = buildSystemAttestation([], llmText)
-  assert.ok(out.includes('未生成任何靓号海报'))
-  // 变体:已出图 / 海报已发
-  assert.ok(buildSystemAttestation([], '靚號海報已發送到群裡').includes('未生成任何靓号海报'))
-  // 声称出图优先于登记话术匹配(不返回客资话术)
-  assert.ok(!out.includes('客资'))
-})
+// 注:靓号"假出图"的正则检测(CLAIMS_PLATES + 纠偏重试)已废弃 —— 那是在用 if-else 模拟语义理解。
+// 图是否发出由工具执行本身决定(账本为准),语义判断交给模型;
+// 根因(max_tokens=1000 装不下大入参 tool_use,端点静默降级成纯文本)已由 LLM_MAX_TOKENS=8192 修复。
 
-test('事实接管:简中"海报已经生成"等带副词的完成态变体也要戳穿', async () => {
-  // 回归用例:2026-09-15 修 CLAIMS_PLATES 漏判 ——"已生成"中间隔了"经"会漏;
-  // 同时验证"已经发送了海报""已经发了海报""帮你生成"等常见自然语言变体都被覆盖
-  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
-  const variants = [
-    '海报已经生成发到群里啦',
-    '海報已經生成發到群裡啦',
-    '已经发送了海报',
-    '已经发了海报',
-    '帮你生成好啦',
-    '我帮你出图给你啦',
-  ]
-  for (const text of variants) {
-    const out = buildSystemAttestation([], text)
-    assert.ok(out.includes('未生成任何靓号海报'), `应该戳穿但漏了:${text}`)
-  }
-})
-
-test('事实接管:正常聊天提到"图"字但无生成声称 → 不误伤', async () => {
-  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
-  assert.equal(buildSystemAttestation([], '你可以把图片发给我看看'), '')
-})
-
-test('事实接管:CLAIMS_PLATES 不误伤普通聊天(含"出发你"等近似词)', async () => {
-  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
-  const benign = [
-    '明天出发你们记得带伞',
-    '几点出发你们定一下',
-    '生成二维码的网站发我一份',
-  ]
-  for (const text of benign) {
-    assert.equal(buildSystemAttestation([], text), '', `误伤了:${text}`)
-  }
-})
