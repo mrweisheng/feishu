@@ -99,8 +99,14 @@ export function buildSystemAttestation(ledger: LedgerEntry[], llmText?: string):
   // 账本无写工具记录 —— 可能是纯闲聊(正常),也可能是 LLM 编了"已登记"却没真调工具(bug)
   // 用 LLM 原文交叉检测:出现登记类声称词就戳穿,否则当作纯闲聊不追加
   if (writes.length === 0) {
-    if (llmText && CLAIMS_REGISTER.test(llmText)) {
-      return '⚠️ 系统核对:本次实际未成功登记任何客资(机器人未真正执行录入),请重新发图或换张清晰的图'
+    if (llmText) {
+      // 靓号线路:LLM 嘴上说"已生成/出图"但实际没调工具 → 戳穿(在客资检测之前判,话术更贴切)
+      if (CLAIMS_PLATES.test(llmText)) {
+        return '⚠️ 系统核对:本次实际未生成任何靓号海报(未真正执行出图),请重新 @机器人再试一次'
+      }
+      if (CLAIMS_REGISTER.test(llmText)) {
+        return '⚠️ 系统核对:本次实际未成功登记任何客资(机器人未真正执行录入),请重新发图或换张清晰的图'
+      }
     }
     return ''
   }
@@ -163,6 +169,13 @@ export function buildSystemAttestation(ledger: LedgerEntry[], llmText?: string):
  * 命中即追加系统核对戳穿,不命中则当纯闲聊放过(避免给纯聊天乱追加)。
  */
 const CLAIMS_REGISTER = /已登记|已录入|已记录|登记了|录入了|给你录|帮你登|已记下|新增了|已添加|录成功|登记成功|录入成功/
+
+/**
+ * LLM 文本里"声称已生成靓号海报/出图"的关键词。
+ * 对应 2026-09-15 线上事故:LLM 挑完号直接说"生成出图啦",实际根本没调 generate_daily_plates,
+ * 用户等图等不到。命中即追加系统核对戳穿。
+ */
+const CLAIMS_PLATES = /生成出图|已出图|出图啦|已生成|帮你生成|幫你生成|海报已|海報已|已發圖|已发图|已發送海報|已发送海报/
 
 /** 工具的人类可读动词(label),用于「系统核对」措辞 */
 const TOOL_LABELS: Record<string, string> = {

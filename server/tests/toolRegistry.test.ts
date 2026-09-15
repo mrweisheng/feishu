@@ -269,3 +269,20 @@ test('事实接管:本批全部重复 → 明确告知"全部与已有重复"', 
   assert.ok(out.includes('「KK」'))
   assert.ok(!out.includes(REAL_CUSTOMER_LINK), '全跳过时绝不贴链接')
 })
+
+test('事实接管:LLM 嘴上说"生成出图"但账本无写工具 → 戳穿靓号假出图', async () => {
+  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
+  // 线上真实话术
+  const llmText = '精選這兩個…完整靚號卡幫你生成出圖啦 ⬇️'
+  const out = buildSystemAttestation([], llmText)
+  assert.ok(out.includes('未生成任何靓号海报'))
+  // 变体:已出图 / 海报已发
+  assert.ok(buildSystemAttestation([], '靚號海報已發送到群裡').includes('未生成任何靓号海报'))
+  // 声称出图优先于登记话术匹配(不返回客资话术)
+  assert.ok(!out.includes('客资'))
+})
+
+test('事实接管:正常聊天提到"图"字但无生成声称 → 不误伤', async () => {
+  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
+  assert.equal(buildSystemAttestation([], '你可以把图片发给我看看'), '')
+})
