@@ -29,3 +29,4 @@ server/dist/
 # 本地临时目录 / 编辑器工作区
 scratch/
 .zcode/
+server/data/daily-plates-*.json
