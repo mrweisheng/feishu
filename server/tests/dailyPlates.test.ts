@@ -40,18 +40,24 @@ test('持久化状态损坏/越界时兜底随机,不崩溃', () => {
 // ---- maskPlateNumber:海报打码(防比价) ----
 import { maskPlateNumber } from '../src/services/dailyPlates.js'
 
-test('打码:含 4 必遮 4(哪怕在尾数)', () => {
-  assert.equal(maskPlateNumber('JU45'), 'JU*5')
-  assert.equal(maskPlateNumber('14'), '1*')
-  assert.equal(maskPlateNumber('4412'), '*412') // 遮第一个 4
-})
-
-test('打码:无 4 时遮字母(字母不带吉凶),保留尾数', () => {
-  assert.equal(maskPlateNumber('JU15'), '*U15')
+test('打码:遮码位置选"可见部分最靚"的那个', () => {
+  // 遮 4 后变顺子:4678 → *678
+  assert.equal(maskPlateNumber('4678'), '*678')
+  // 遮尾数后像双八:881 → 88*
+  assert.equal(maskPlateNumber('881'), '88*')
+  // 8F35:遮字母 F,8 頭 5 尾可见
   assert.equal(maskPlateNumber('8F35'), '8*35')
+  // 96:遮 6 保留尾 9(9 比 6 更值)
+  assert.equal(maskPlateNumber('96'), '9*')
+  // 1688:怎么遮都靚,同分取最前 → *688(可见 88 尾叠 + 尾 8)
+  assert.equal(maskPlateNumber('1688'), '*688')
 })
 
-test('打码:纯数字号遮第一位,尾数照留', () => {
-  assert.equal(maskPlateNumber('1688'), '*688')
-  assert.equal(maskPlateNumber('96'), '*6')
+test('打码:含 4 优先遮 4(同分规则)', () => {
+  // 4412:遮任何一个 4 都剩一个 4,但同分时优先遮 4、取最前 → *412
+  assert.equal(maskPlateNumber('4412'), '*412')
+  // 14 → 1*(遮 4 比遮 1 好:可见部分无 4)
+  assert.equal(maskPlateNumber('14'), '1*')
+  // JU45:遮 4 后可见 JU5 无忌讳
+  assert.equal(maskPlateNumber('JU45'), 'JU*5')
 })

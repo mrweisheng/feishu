@@ -24,26 +24,42 @@ export interface PlatePick {
 
 /**
  * 号码打码:同行都在发完整号码,用户看到一模一样的号会去比价。
- * 海报展示时遮掉一个字符,既防比价又留悬念。规则(确定性,不靠模型):
- *   - 尾数(最后一位)是灵韵所在,原则上保留;
- *   - 含「4」则必遮 4 —— 忌讳位直接变悬念,一举两得(哪怕 4 在尾数也遮);
- *   - 否则优先遮字母(字母不带吉凶,数字行情才看得懂),从左往右第一个;
- *   - 纯数字号遮第一位(尾数照留)。
+ * 遮码位置不是固定的,而是"遮掉之后,看得见的部分要显得最靚"——
+ * 平平无奇的号,遮对一位反而身价倍增(如 4678 → *678 像顺子,881 → 88* 像双八字)。
+ *
+ * 实现:对每一个候选遮码位置,给"遮码后的可见部分"按港人拣牌逻辑打分,取最高分:
+ *   - 大加分:可见部分出现豹子/连叠(888)、尾叠(88/99)、顺子(678)、一路發(168/1688);
+ *   - 小加分:可见尾数 8/9/6;
+ *   - 减分:可见部分仍含 4(遮掉的那位不算,所以含 4 的号天然倾向遮 4)、可见尾数 3/7 等弱尾;
+ *   - 同分时的次序偏好:遮 4 > 遮字母(字母不带吉凶)> 遮靠前的位置。
  */
+function visibleScore(masked: string): number {
+  const digits = masked.replace(/\*/g, '')
+  let score = 0
+  if (masked.includes('4')) score -= 800
+  if (/(\d)\1\1/.test(masked)) score += 1000 // 豹子/三连
+  if (/012|123|234|345|456|567|678|789/.test(masked)) score += 600 // 顺子
+  if (/1688|168/.test(masked)) score += 300 // 一路發
+  if (/(\d)\1$/.test(digits)) score += 400 // 尾叠(可见数字的尾部)
+  const tail = digits.slice(-1)
+  score += ({ '8': 150, '9': 100, '6': 80 } as Record<string, number>)[tail] ?? 0
+  score -= ({ '3': 100, '7': 60, '5': 20, '1': 10, '0': 10 } as Record<string, number>)[tail] ?? 0
+  return score
+}
+
 export function maskPlateNumber(number: string): string {
-  const chars = number.split('')
-  const idx4 = chars.findIndex((c) => c === '4')
-  if (idx4 >= 0) {
-    chars[idx4] = '*'
-    return chars.join('')
+  let best = { idx: -1, masked: '', score: -Infinity }
+  for (let i = 0; i < number.length; i++) {
+    const chars = number.split('')
+    const hidden = chars[i]
+    chars[i] = '*'
+    const masked = chars.join('')
+    let score = visibleScore(masked)
+    if (hidden === '4') score += 60 // 同分优先遮 4
+    if (/[A-Za-z]/.test(hidden)) score += 30 // 同分优先遮字母
+    if (score > best.score) best = { idx: i, masked, score }
   }
-  const letterIdx = chars.findIndex((c, i) => i !== chars.length - 1 && /[A-Za-z]/.test(c))
-  if (letterIdx >= 0) {
-    chars[letterIdx] = '*'
-    return chars.join('')
-  }
-  chars[0] = '*'
-  return chars.join('')
+  return best.masked
 }
 
 export interface DailyPlateCardOptions {
