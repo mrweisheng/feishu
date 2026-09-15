@@ -86,28 +86,27 @@ export function scheduleDailyPlatesRun(chatId: string): void {
   pendingTimer.unref?.()
 }
 
-/** 启动补救:当天已有现牌文件但未处理(如上午发布、下午才上线),补跑一次 */
-export async function catchUpOnStartup(): Promise<void> {
+/**
+ * 手动重放:清除今天所有现牌文件的"已处理"标记后重新跑一遍批次。
+ * 用于验证/排障(npm run plates:replay)——不等下一次消息,当天的问题当场暴露、当场重出。
+ * 注意:会在输出群重新发海报(旧海报不会撤回)。
+ */
+export async function replayToday(): Promise<void> {
   const chatId = config.PLATES_SOURCE_CHAT_ID
-  if (!chatId) return
-  // 只数未处理的 docx(png 与 docx 内容相同,会在批次里直接标记已处理)
+  if (!chatId) throw new Error('PLATES_SOURCE_CHAT_ID 未配置,无法重放')
   const processed = loadProcessed()
-  const unprocessedDocx = listChatFileMessagesSince(chatId, beijingTodayStartMs())
-    .filter((r) => r.message_type === 'file' && !processed.has(r.message_id))
-    .filter((r) => {
-      try {
-        const c = JSON.parse(r.content || '{}')
-        return !!c.file_key && /\.docx?$/i.test(c.file_name || c.name || '')
-      } catch {
-        return false
-      }
-    })
-  if (unprocessedDocx.length > 0) {
-    console.log(`📅 靓号自动化:发现今天 ${unprocessedDocx.length} 条未处理的现牌文件,启动补救流程`)
-    await runDailyBatch(chatId)
-  } else {
-    console.log('📅 靓号自动化:今天暂无未处理的现牌文件')
+  let removed = 0
+  for (const id of listChatFileMessagesSince(chatId, beijingTodayStartMs()).map((r) => r.message_id)) {
+    if (processed.delete(id)) removed++
   }
+  saveProcessed(processed)
+  console.log(`🔁 靓号重放:已清除今天 ${removed} 条文件的已处理标记,重新处理...`)
+  await runDailyBatch(chatId)
+}
+
+/** 启动重放:服务一启动就把今天的现牌消息全部重新处理一遍(清除当天已处理标记)。
+ * 用于每次上线即验证当天产出;之后按正常流程标记,处理过的不再重复。 */export async function catchUpOnStartup(): Promise<void> {
+  await replayToday()
 }
 
 // ---- 批次执行 ----

@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "test": "node --test --import tsx tests/**/*.test.ts",
     "deploy": "npm run build && pm2 restart feishu-server",
-    "deploy:logs": "pm2 logs feishu-server --lines 80"
+    "deploy:logs": "pm2 logs feishu-server --lines 80",
+    "plates:replay": "tsx scripts/plates-replay.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.7",
