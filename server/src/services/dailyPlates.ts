@@ -160,6 +160,27 @@ export async function renderDailyPlateCard(opts: DailyPlateCardOptions): Promise
     await page.setViewport({ width: 1080, height: 1440, deviceScaleFactor: 2 })
     await page.goto(`file://${template.replace(/\\/g, '/')}`, { waitUntil: 'networkidle0' })
 
+    // 字体一致性:模板字体栈首选 PingFang HK / Songti TC / Helvetica Neue(苹果/商业字体,服务器没有,
+    // Chromium 会退到系统默认字体,导致"排版一致但字形不对")。这里用 @font-face 把字体栈里出现的
+    // 家族名统一映射到随仓库分发的 Noto TC 可变字体(daily_plates_v2/fonts/,OFL 协议可分发),
+    // 保证 Windows 开发机与 Linux 服务器渲染出完全相同的字形。变量字体覆盖 100-900 全字重。
+    const fontsDir = `${dir.replace(/\\/g, '/')}/fonts`
+    const fontFace = (families: string[], file: string) =>
+      families
+        .map(
+          (f) =>
+            `@font-face{font-family:'${f}';src:url('file://${fontsDir}/${file}');font-weight:100 900;font-display:block;}`,
+        )
+        .join('')
+    await page.addStyleTag({
+      content:
+        fontFace(['PingFang HK', 'PingFang TC', 'Noto Sans TC', 'Microsoft JhengHei'], 'NotoSansTC-VF.ttf') +
+        fontFace(['Songti TC', 'Noto Serif TC', 'STSong', 'SimSun'], 'NotoSerifTC-VF.ttf') +
+        fontFace(['Helvetica Neue', 'Helvetica', 'Arial'], 'NotoSansTC-VF.ttf'),
+    })
+    // 等 @font-face 全部加载完成再动 DOM/截图,否则首帧可能用回退字体
+    await page.evaluateHandle('document.fonts.ready')
+
     // 用运行时 new Function 构造页面脚本:tsx/esbuild 会给 TS 源码里的箭头函数注入
     // __name 调试辅助,浏览器上下文没有这个符号,直接传函数会 ReferenceError。
     //
