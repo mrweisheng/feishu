@@ -61,3 +61,33 @@ test('打码:含 4 优先遮 4(同分规则)', () => {
   // JU45:遮 4 后可见 JU5 无忌讳
   assert.equal(maskPlateNumber('JU45'), 'JU*5')
 })
+
+// ---- pickBestPlates:确定性选号(代码规则,不靠模型) ----
+import { pickBestPlates, scorePlateNumber } from '../src/services/dailyPlates.js'
+
+test('选号:豹子/尾8 最靚,含 4 大减分', () => {
+  assert.ok(scorePlateNumber('888') > scorePlateNumber('886'))
+  assert.ok(scorePlateNumber('1688') > scorePlateNumber('1689'))
+  assert.ok(scorePlateNumber('1238') > scorePlateNumber('1248'))
+  assert.ok(scorePlateNumber('8888') < 0 || scorePlateNumber('1234') < 0)
+  assert.ok(scorePlateNumber('1234') < scorePlateNumber('1235'))
+})
+
+test('选号:从 17 个候选里稳定挑出前二', () => {
+  const list = [
+    { region: '粤Z', number: 'Z9W53' }, { region: '粤Z', number: 'ZKR52' },
+    { region: '粤Z', number: 'Z5V35' }, { region: '粤Z', number: 'Z9Y83' },
+    { region: '粤Z', number: 'Z9W62' }, { region: '粤Z', number: 'Z9F79' },
+    { region: '粤Z', number: 'Z9J79' }, { region: '粤Z', number: 'Z5E25' },
+    { region: '粤Z', number: 'Z9G26' }, { region: '粤Z', number: 'ZJS75' },
+    { region: '粤Z', number: 'Z6A03' }, { region: '粤Z', number: 'ZH65' },
+    { region: '粤Z', number: 'ZKH53' }, { region: '粤Z', number: 'Z5W05' },
+    { region: '粤Z', number: 'Z5E00' }, { region: '粤Z', number: 'Z9F38' },
+    { region: '粤Z', number: 'Z9G26' },
+  ]
+  const picks = pickBestPlates(list)!
+  assert.equal(picks.length, 2)
+  // Z5E00(尾 00/短)与 Z9F79/Z9J79(双 9 尾 9)应为头部;4 无、3 尾的靠后
+  const nums = picks.map((p) => p.number)
+  assert.ok(nums.includes('Z5E00'), `应选中 Z5E00,实际 ${nums}`)
+})

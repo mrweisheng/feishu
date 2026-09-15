@@ -56,7 +56,7 @@ const LINK_SOURCES: Record<string, string | null> = {
 const WRITE_TOOLS = new Map<string, WriteToolSpec>([
   ['record_customer_info', { name: 'record_customer_info', linkKey: 'customer' }],
   ['set_reminder', { name: 'set_reminder' }], // 写工具(改 DB + 调度),同源 bug 一起根治,但不贴链接
-  ['generate_daily_plates', { name: 'generate_daily_plates' }], // 写工具(发图到群),成败由账本说了算
+  // 注:靓号海报(原 generate_daily_plates)已迁出工具体系,走确定性管线 services/platesFlow.ts
   // 未来:record_order / record_after_sale / record_appointment ...
 ])
 
@@ -170,7 +170,6 @@ const CLAIMS_REGISTER = /已登记|已录入|已记录|登记了|录入了|给�
 const TOOL_LABELS: Record<string, string> = {
   record_customer_info: '登记客资',
   set_reminder: '设置提醒',
-  generate_daily_plates: '生成靓号推荐图',
   // 未来按需补
 }
 

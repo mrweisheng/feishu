@@ -3,6 +3,7 @@ import { apiClient, wsClient } from './client.js'
 import { saveMessage, fillSenderName, getMessageById } from '../db/messages.js'
 import { fetchHistoryGap } from './history.js'
 import { askLLM, type LlmContext } from '../llm.js'
+import { tryRunDailyPlatesFlow } from '../services/platesFlow.js'
 import { replyMessage } from './messages.js'
 import { startReminderScheduler } from './reminders.js'
 
@@ -277,6 +278,13 @@ async function tryAnswerMention(message: any, openId: string): Promise<void> {
   }
 
   try {
+    // 靓号海报专线:素材(图/文档)能提取出「口岸 + ≥2 个车牌」就走确定性管线
+    // (模型仅负责提取,选号/打码/出图全是代码);提取不到则照常走通用 LLM 问答。
+    if (ctx.voucherImageKeys?.length || ctx.voucherFileKeys?.length) {
+      const handled = await tryRunDailyPlatesFlow(ctx, userText)
+      if (handled) return
+    }
+
     const answer = await askLLM(userText, ctx)
     console.log('🤖 LLM 回答:', answer.slice(0, 200))
     try {

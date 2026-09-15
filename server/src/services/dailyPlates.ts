@@ -184,6 +184,39 @@ function resolvePortEn(port: string, portEn?: string): string | undefined {
   return PORT_EN_MAP[bare] ?? PORT_EN_MAP[port]
 }
 
+/**
+ * 单个号码的"靚度"打分(港人拣牌逻辑,代码确定性执行):
+ *   大加分:豹子/三连(888)、顺子(678)、一路發(168/1688)、尾叠(88/99)
+ *   小加分:尾 8/9/6;叠字母(BB/AA)、号码短而齐
+ *   减分:含 4(每个 -800)、弱尾 3/7/5/1/0
+ */
+export function scorePlateNumber(number: string): number {
+  let s = 0
+  const fours = (number.match(/4/g) || []).length
+  s -= fours * 800
+  if (/(\d)\1\1/.test(number)) s += 1000
+  if (/012|123|234|345|456|567|678|789/.test(number)) s += 600
+  if (/1688|168/.test(number)) s += 300
+  if (/(\d)\1$/.test(number)) s += 400
+  if (/([A-Z])\1/i.test(number)) s += 100
+  s += ({ '8': 150, '9': 100, '6': 80 } as Record<string, number>)[number.slice(-1)] ?? 0
+  s -= ({ '3': 100, '7': 60, '5': 20, '1': 10, '0': 10 } as Record<string, number>)[number.slice(-1)] ?? 0
+  s += Math.max(0, (7 - number.length) * 15) // 短而齐更稀有
+  return s
+}
+
+/**
+ * 从候选里挑出最靚的 2 个(确定性,取分最高的两个,稳定可复现)。
+ */
+export function pickBestPlates(plates: { region: string; number: string; note?: string }[]): [PlatePick, PlatePick] | null {
+  if (plates.length < 2) return null
+  const sorted = [...plates].sort((a, b) => scorePlateNumber(b.number) - scorePlateNumber(a.number))
+  return [
+    { region: sorted[0].region, number: sorted[0].number },
+    { region: sorted[1].region, number: sorted[1].number },
+  ]
+}
+
 /** 渲染靓号推荐卡片,返回 PNG Buffer。抛错由调用方兜底(LLM 会收到 ok:false)。 */
 export async function renderDailyPlateCard(opts: DailyPlateCardOptions): Promise<Buffer> {
   const dir = findTemplateDir()
