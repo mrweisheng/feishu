@@ -5,7 +5,7 @@ import { downloadMessageFile } from '../feishu/media.js'
 import { sendPostWithImage, uploadFeishuImage } from '../feishu/messages.js'
 import { extractDocumentText } from './docxText.js'
 import { extractPlateList } from './platesFlow.js'
-import { writeDailyRecordsToBitable } from './platesBitable.js'
+import { writeDailyRecordsToBitable, auditAndFixBitable } from './platesBitable.js'
 import { maskPlateNumber, pickBestPlates, renderDailyPlateCard, todayDateKey, type PlatePick } from './dailyPlates.js'
 import fs from 'node:fs'
 
@@ -156,6 +156,8 @@ async function runDailyBatch(chatId: string): Promise<void> {
   const portOfFile = new Map<string, string>()
   // 供多维表格入库:每个文件的口岸/类型/候选明细
   const fileGroups: { port: string; type: string; sourceFile: string; plates: CandidatePlate[] }[] = []
+  // 跨文件去重:同一口岸同一号码只保留第一次(补充资料常与高新清单重叠)
+  const seenNumbers = new Map<string, Set<string>>() // port → 已见号码
   for (const f of files) {
     try {
       const buf = await downloadMessageFile(f.messageId, f.fileKey)
@@ -172,13 +174,48 @@ async function runDailyBatch(chatId: string): Promise<void> {
         continue
       }
       // 口岸优先取文件名(格式固定),提取结果做兜底
-      const portKey = portFromFileName(f.name) ?? normalizePort(list.port)
-      portOfFile.set(f.messageId, portKey)
-      const agg = byPort.get(portKey) ?? { plates: [] }
-      agg.plates.push(...list.plates)
-      byPort.set(portKey, agg)
-      fileGroups.push({ port: portKey, type: typeFromFileName(f.name, portKey), sourceFile: f.name, plates: list.plates })
-      console.log(`📅 靓号自动化:${f.name} → ${portKey} ${list.plates.length} 个候选`)
+      const filePort = portFromFileName(f.name) ?? normalizePort(list.port)
+      portOfFile.set(f.messageId, filePort)
+
+      // ── 审核①:号码必须能在原文里找到(保证与原始一致),找不到就剔除 ──
+      const normText = docText.replace(/\s+/g, '')
+      // ── 审核②:note 里写明的口岸与文件归属不同时,以 note 为准归口(补充资料常混多口岸)──
+      const byPortInFile = new Map<string, CandidatePlate[]>()
+      for (const p of list.plates) {
+        if (!normText.includes(p.number)) {
+          console.warn(`🛡️ 审核:号码 ${p.number} 在原文中找不到,已剔除(${f.name})`)
+          continue
+        }
+        let port = filePort
+        for (const alias of Object.keys(PORT_ALIASES)) {
+          if ((p.note ?? '').includes(alias) && PORT_ALIASES[alias] !== port) {
+            port = PORT_ALIASES[alias]
+            break
+          }
+        }
+        const arr = byPortInFile.get(port) ?? []
+        arr.push(p)
+        byPortInFile.set(port, arr)
+      }
+      // ── 审核③:跨文件去重(同口岸同号码只保留第一次)──
+      for (const [port, plates] of byPortInFile) {
+        const seen = seenNumbers.get(port) ?? new Set<string>()
+        const fresh = plates.filter((p) => {
+          if (seen.has(p.number)) {
+            console.log(`🛡️ 审核:号码 ${p.number} 已存在(${port}),跳过重复(${f.name})`)
+            return false
+          }
+          seen.add(p.number)
+          return true
+        })
+        seenNumbers.set(port, seen)
+        if (!fresh.length) continue
+        const agg = byPort.get(port) ?? { plates: [] }
+        agg.plates.push(...fresh)
+        byPort.set(port, agg)
+        fileGroups.push({ port, type: typeFromFileName(f.name, port), sourceFile: f.name, plates: fresh })
+        console.log(`📅 靓号自动化:${f.name} → ${port} ${fresh.length} 个候选(审核通过)`)
+      }
     } catch (err: any) {
       console.error(`【靓号自动化】处理文件失败 ${f.name}:`, err?.message ?? err)
     }
@@ -201,6 +238,12 @@ async function runDailyBatch(chatId: string): Promise<void> {
 
   // 先入库拿多维表格链接(海报文案附上),再发海报;入库失败不影响海报
   const bitableUrl = await writeDailyRecordsToBitable(
+    todayDateKey(),
+    fileGroups.map((g) => ({ ...g, selectedNumbers: (picksByPort.get(g.port) ?? []).map((p) => p.number) })),
+  )
+
+  // 入表审核:读回维格表逐行与预期比对(号码/口岸/类型/精选),不一致自动清空重写修复
+  await auditAndFixBitable(
     todayDateKey(),
     fileGroups.map((g) => ({ ...g, selectedNumbers: (picksByPort.get(g.port) ?? []).map((p) => p.number) })),
   )

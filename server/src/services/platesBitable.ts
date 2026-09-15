@@ -202,3 +202,128 @@ export async function writeDailyRecordsToBitable(
     return null
   }
 }
+
+// ---- 入表审核与自动修复 ----
+
+interface ExpectedRow {
+  number: string // 归一化后的号牌主体(如 9E66)
+  port: string
+  type: string
+  note: string
+  selected: boolean
+  sourceFile: string
+}
+
+function buildExpectedRows(groups: DailyRecordGroup[]): ExpectedRow[] {
+  const rows: ExpectedRow[] = []
+  for (const g of groups) {
+    for (const p of g.plates) {
+      rows.push({
+        number: p.number,
+        port: g.port,
+        type: g.type,
+        note: p.note ?? '',
+        selected: g.selectedNumbers.includes(p.number),
+        sourceFile: g.sourceFile,
+      })
+    }
+  }
+  return rows
+}
+
+/** 从 bitable 读回全部记录,归一成可比较的行 */
+async function readActualRows(appToken: string, tableId: string): Promise<ExpectedRow[]> {
+  const rows: ExpectedRow[] = []
+  let pageToken: string | undefined
+  do {
+    const res: any = await apiClient.request({
+      method: 'GET',
+      url: `/open-apis/bitable/v1/apps/${appToken}/tables/${tableId}/records`,
+      params: { page_size: 500, ...(pageToken ? { page_token: pageToken } : {}) },
+    })
+    for (const r of res?.data?.items ?? []) {
+      const f = r.fields ?? {}
+      const numText = Array.isArray(f['車牌號碼']) ? f['車牌號碼'][0]?.text : f['車牌號碼']
+      const num = String(numText ?? '')
+        .replace(/^[粤粵]+/i, '')
+        .replace(/[港澳]+$/, '')
+        .trim()
+      const sel = f['是否今日精選']
+      rows.push({
+        number: num,
+        port: String(f['口岸'] ?? ''),
+        type: String(f['類型'] ?? ''),
+        note: String(f['批文情況'] ?? ''),
+        selected: sel === true || sel === 1,
+        sourceFile: String(f['來源文件'] ?? ''),
+      })
+    }
+    pageToken = res?.data?.has_more ? res?.data?.page_token : undefined
+  } while (pageToken)
+  return rows
+}
+
+function rowKey(r: ExpectedRow): string {
+  return `${r.number}|${r.port}|${r.type}|${r.selected ? 1 : 0}`
+}
+
+/** 逐行比对(多重集合),返回不一致的摘要;一致返回 null */
+function diffRows(expected: ExpectedRow[], actual: ExpectedRow[]): string | null {
+  if (actual.length !== expected.length) {
+    return `行数不符:期望 ${expected.length},实际 ${actual.length}`
+  }
+  // 重复号码检测(同号在表里出现两次就是错)
+  const numCount = new Map<string, number>()
+  for (const r of actual) numCount.set(r.number, (numCount.get(r.number) ?? 0) + 1)
+  const dups = [...numCount.entries()].filter(([, n]) => n > 1).map(([k]) => k)
+  if (dups.length) return `存在重复号码:${dups.join('、')}`
+  const key = (r: ExpectedRow) => rowKey(r)
+  const exp = new Set(expected.map(key))
+  const act = new Set(actual.map(key))
+  for (const k of exp) if (!act.has(k)) return `缺少预期行:${k}`
+  for (const k of act) if (!exp.has(k)) return `多出意外行:${k}`
+  return null
+}
+
+/**
+ * 入表审核:读回维格表逐行与预期比对(号码/口岸/类型/精选/行数/重复),
+ * 不一致自动清空重写修复并二次验证。
+ */
+export async function auditAndFixBitable(dateKey: string, groups: DailyRecordGroup[]): Promise<void> {
+  try {
+    const appToken = await ensureAppToken()
+    const tableId = await ensureTable(appToken)
+    const expected = buildExpectedRows(groups)
+    const actual = await readActualRows(appToken, tableId)
+    const diff = diffRows(expected, actual)
+    if (!diff) {
+      console.log(`🛡️ 审核:维格表 ${actual.length} 行与预期完全一致(无重复,口岸/类型/精选均正确)`)
+      return
+    }
+    console.warn(`🛡️ 审核:维格表不一致(${diff}),自动修复:清空重写...`)
+    await clearTableRecords(appToken, tableId)
+    const records = buildExpectedRows(groups).map((r) => ({
+      fields: {
+        '車牌號碼': `粤Z${r.number}港`,
+        '口岸': r.port,
+        '類型': r.type,
+        ...(r.note ? { '批文情況': r.note } : {}),
+        '是否今日精選': r.selected,
+        '批次日期': dateKey,
+        '來源文件': r.sourceFile,
+      },
+    }))
+    for (let i = 0; i < records.length; i += 500) {
+      await apiClient.request({
+        method: 'POST',
+        url: `/open-apis/bitable/v1/apps/${appToken}/tables/${tableId}/records/batch_create`,
+        data: { records: records.slice(i, i + 500) },
+      })
+    }
+    const recheck = diffRows(expected, await readActualRows(appToken, tableId))
+    if (recheck) console.error(`🛡️ 审核:修复后仍不一致(${recheck}),请人工检查维格表`)
+    else console.log(`🛡️ 审核:自动修复完成,重读 ${expected.length} 行全部一致 ✅`)
+  } catch (err: any) {
+    console.error('【靓号维格表审核失败】(不影响已发出的海报)', err?.response?.data?.msg || (err?.message ?? err))
+  }
+}
