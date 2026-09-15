@@ -26,21 +26,20 @@ export async function uploadFeishuImage(buf: Buffer): Promise<string> {
 }
 
 /**
- * 回复一条富文本(post)消息:文字 + @用户 + 图片(同一条富文本里,引用挂在原消息下)。
+ * 回复一条富文本(post)消息:文字 + 图片;userOpenId 传了才 @(自动出图场景不 @ 任何人)。
  */
 export async function replyPostWithImage(
   messageId: string,
-  userOpenId: string,
+  userOpenId: string | null,
   imageKey: string,
   text: string,
 ): Promise<void> {
+  const firstLine: any[] = [{ tag: 'text', text: `${text}\n` }]
+  if (userOpenId) firstLine.push({ tag: 'at', user_id: userOpenId })
   const content = {
     zh_cn: {
       content: [
-        [
-          { tag: 'text', text: `${text}\n` },
-          { tag: 'at', user_id: userOpenId },
-        ],
+        firstLine,
         [{ tag: 'img', image_key: imageKey }],
       ],
     },

@@ -188,3 +188,23 @@ export function getMaxCreateTimeOfChat(chatId: string): number | null {
 export function listKnownChatIds(): string[] {
   return knownChatIds.all().map((r: any) => r.chat_id as string)
 }
+
+// 某群某时间点之后的全部文件消息(靓号自动化:找当天未处理的现牌文件)
+const stmtChatFileMessagesSince = db.prepare(
+  `SELECT message_id, chat_id, message_type, sender_name, content, create_time
+   FROM messages WHERE chat_id = ? AND create_time >= ? AND message_type = 'file'
+   ORDER BY create_time ASC`
+)
+
+export interface ChatFileMessageRow {
+  message_id: string
+  chat_id: string
+  message_type: string | null
+  sender_name: string | null
+  content: string | null
+  create_time: number | null
+}
+
+export function listChatFileMessagesSince(chatId: string, sinceTs: number): ChatFileMessageRow[] {
+  return stmtChatFileMessagesSince.all(chatId, sinceTs) as unknown as ChatFileMessageRow[]
+}

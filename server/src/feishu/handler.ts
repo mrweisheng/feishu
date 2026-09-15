@@ -4,6 +4,8 @@ import { saveMessage, fillSenderName, getMessageById } from '../db/messages.js'
 import { fetchHistoryGap } from './history.js'
 import { askLLM, type LlmContext } from '../llm.js'
 import { tryRunDailyPlatesFlow } from '../services/platesFlow.js'
+import { scheduleDailyPlatesRun, catchUpOnStartup } from '../services/platesAutomation.js'
+import { config } from '../config.js'
 import { replyMessage } from './messages.js'
 import { startReminderScheduler } from './reminders.js'
 
@@ -340,6 +342,9 @@ async function handleIncomingMessage(data: FeishuEvent): Promise<void> {
 
   console.log('✅ 已入库 message_id:', message.message_id)
 
+  // 靓号自动化:现牌输出群出现文件时触发(内部自带群过滤与防抖,不阻塞 ACK)
+  scheduleDailyPlatesRun(message.chat_id)
+
   // 慢操作整体异步化:查名字(通讯录 API)+ 日志 + @机器人问答(LLM tool-use)。
   // 不 await → handler 立刻返回 → SDK 立刻 ACK → 不再因 LLM 慢而断流。
   processMessageAsync(message, openId).catch((e: any) =>
@@ -390,6 +395,15 @@ export function startFeishuWorker(): void {
   setTimeout(backfill, 5000)
   setInterval(backfill, ONE_DAY_MS)
   console.log('⏰ 历史补漏已调度:启动5秒后执行一次,之后每24小时一次')
+
+  // 靓号自动化补救:等历史补漏把今天的消息入库后(3 分钟,足够宽裕),
+  // 检查现牌输出群当天是否有未处理的现牌文件 —— 上午发文件、下午才上线的场景也能补出图
+  if (config.PLATES_SOURCE_CHAT_ID) {
+    setTimeout(() => {
+      catchUpOnStartup().catch((e: any) => console.error('【靓号自动化补救失败】', e?.stack ?? e?.message ?? e))
+    }, 180_000)
+    console.log('⏰ 靓号自动化补救已调度:启动 3 分钟后检查当天未处理的现牌文件')
+  }
 
   // 提醒调度器:每60秒轮询到点的提醒,reply 原消息 @用户
   startReminderScheduler()

@@ -46,6 +46,12 @@ export const config = {
   // 防止服务挂半天后重启半夜轰炸用户;30min 是体验与打扰的平衡点。
   REMINDER_RESEND_WINDOW_MS: Number(process.env.REMINDER_RESEND_WINDOW_MS) || 30 * 60 * 1000,
 
+  // ---- 每日靓号自动化 ----
+  // 「每日现牌输出群」chat_id:该群出现现牌文件(docx)时自动汇总各口岸出海报(留空关闭)
+  PLATES_SOURCE_CHAT_ID: process.env.PLATES_SOURCE_CHAT_ID || 'oc_e42f9b55c0b6b78537f6a6f892fc6c11',
+  // 检测到文件后等待同批文件发完的防抖窗口(毫秒)
+  PLATES_BATCH_DEBOUNCE_MS: Number(process.env.PLATES_BATCH_DEBOUNCE_MS) || 90 * 1000,
+
   // ---- 知识库(RAG) ----
   // 知识库是独立内容源:只能通过管理页录入(文本/粘贴),与飞书消息归档、客资表完全无关。
   // 嵌入走 OpenAI 兼容的 /v1/embeddings(硅基流动 BAAI/bge-m3:1024 维、8192 token、L2 归一化)。

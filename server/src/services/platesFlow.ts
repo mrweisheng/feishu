@@ -65,7 +65,7 @@ function isValidPlate(p: any): boolean {
  * 调模型提取口岸+车牌列表(最多 attempts 次:提取失败/JSON 不合法/被截断都重试)。
  * 返回 null 表示重试后仍提取不出有效结构。
  */
-async function extractPlateList(
+export async function extractPlateList(
   userText: string,
   images: { base64: string; mediaType: 'image/jpeg' | 'image/png' }[],
   docText: string,
