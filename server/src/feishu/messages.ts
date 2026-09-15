@@ -53,3 +53,27 @@ export async function replyPostWithImage(
     },
   })
 }
+
+/**
+ * 主动发送一条富文本(post)到指定群(按 chat_id):文字 + 图片。
+ * 用于跨群输出(如靓号海报发到输出群),不能用 reply(只能同一条消息下回复)。
+ */
+export async function sendPostWithImage(chatId: string, imageKey: string, text: string): Promise<void> {
+  const content = {
+    zh_cn: {
+      content: [
+        [{ tag: 'text', text: `${text}\n` }],
+        [{ tag: 'img', image_key: imageKey }],
+      ],
+    },
+  }
+  await apiClient.request({
+    method: 'POST',
+    url: '/open-apis/im/v1/messages?receive_id_type=chat_id',
+    data: {
+      receive_id: chatId,
+      msg_type: 'post',
+      content: JSON.stringify(content),
+    },
+  })
+}

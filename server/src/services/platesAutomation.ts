@@ -2,7 +2,7 @@ import path from 'node:path'
 import { config } from '../config.js'
 import { listChatFileMessagesSince } from '../db/messages.js'
 import { downloadMessageFile } from '../feishu/media.js'
-import { replyPostWithImage, uploadFeishuImage } from '../feishu/messages.js'
+import { sendPostWithImage, uploadFeishuImage } from '../feishu/messages.js'
 import { extractDocumentText } from './docxText.js'
 import { extractPlateList } from './platesFlow.js'
 import { maskPlateNumber, pickBestPlates, renderDailyPlateCard, todayDateKey, type PlatePick } from './dailyPlates.js'
@@ -106,12 +106,20 @@ function listUnprocessed(chatId: string): { messageId: string; fileKey: string; 
     .map((r) => {
       try {
         const c = JSON.parse(r.content || '{}')
-        return { messageId: r.message_id, fileKey: c.file_key, name: c.name || '' }
+        // 飞书 file 消息的文件名字段是 file_name(旧版兼容 name)
+        return { messageId: r.message_id, fileKey: c.file_key, name: c.file_name || c.name || '' }
       } catch {
         return { messageId: r.message_id, fileKey: '', name: '' }
       }
     })
-    .filter((f) => !!f.fileKey)
+    .filter((f) => {
+      if (!f.fileKey) return false
+      if (!/\.docx?$/i.test(f.name)) {
+        console.warn(`📅 靓号自动化:跳过非 docx 文件「${f.name || '(无名)'}」`)
+        return false
+      }
+      return true
+    })
 }
 
 // ---- 批次执行 ----
@@ -125,7 +133,7 @@ async function runDailyBatch(chatId: string): Promise<void> {
   console.log(`📅 靓号自动化:开始处理 ${files.length} 个现牌文件`)
 
   // 按口岸汇总(优先 docx:同批的 png 内容相同,跳过)
-  const byPort = new Map<string, { plates: CandidatePlate[]; replyTo: string }>()
+  const byPort = new Map<string, { plates: CandidatePlate[] }>()
   for (const f of files) {
     if (!/\.docx?$/i.test(f.name)) continue // png 等跳过(内容与 docx 相同)
     try {
@@ -142,7 +150,7 @@ async function runDailyBatch(chatId: string): Promise<void> {
       }
       // 口岸优先取文件名(格式固定),提取结果做兜底
       const portKey = portFromFileName(f.name) ?? normalizePort(list.port)
-      const agg = byPort.get(portKey) ?? { plates: [], replyTo: f.messageId }
+      const agg = byPort.get(portKey) ?? { plates: [] }
       agg.plates.push(...list.plates)
       byPort.set(portKey, agg)
       console.log(`📅 靓号自动化:${f.name} → ${portKey} ${list.plates.length} 个候选`)
@@ -170,7 +178,7 @@ async function runDailyBatch(chatId: string): Promise<void> {
       })
       const imageKey = await uploadFeishuImage(jpeg)
       const maskedLine = picks.map((p) => `${p.region}·${maskPlateNumber(p.number)}·港`).join(' / ')
-      await replyPostWithImage(group.replyTo, null, imageKey, `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}),海報如下 👇`)
+      await sendPostWithImage(config.PLATES_OUTPUT_CHAT_ID, imageKey, `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}),海報如下 👇`)
       okCount++
       console.log(`🖼️ 靓号海报已发送: ${port}, 候选 ${group.plates.length} 个, picks=`, picks.map((p) => `${p.number}(→${maskPlateNumber(p.number)})`))
     } catch (err: any) {
