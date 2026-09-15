@@ -590,7 +590,11 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   for (let i = 0; i < 3; i++) {
     const res = await anthropic.messages.create({
       model: modelName,
-      max_tokens: 1000,
+      // ⚠️ 不能用小预算:MiniMax M3 是推理模型,输出里混着思考块,工具调用入参也计入输出。
+      // 靓号工具一次要传 17 个车牌的全量 JSON(仅 tool_use 块就上千 token),max_tokens=1000
+      // 时端点装不下完整工具调用,会静默降级成纯文本回答——表现为"模型永远不调工具"。
+      // 默认 8192,可通过 LLM_MAX_TOKENS 环境变量覆盖(改 .env + 重启即生效,不用 rebuild dist)。
+      max_tokens: config.LLM_MAX_TOKENS,
       system,
       tools: [
         SET_REMINDER_TOOL,

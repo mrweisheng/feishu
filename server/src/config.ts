@@ -28,6 +28,14 @@ export const config = {
   ANTHROPIC_BASE_URL: required('ANTHROPIC_BASE_URL'),
   ANTHROPIC_API_KEY: required('ANTHROPIC_API_KEY'),
   LLM_MODEL: process.env.LLM_MODEL || 'MiniMax-M3',
+  /**
+   * LLM 单次响应 token 预算。⚠️ 不能太小:Minimax M3 是推理模型,输出里混着思考块,
+   * 工具调用入参(靓号场景一次要传 17 个车牌的全量 JSON,tool_use 块就上千 token)也计入输出。
+   * 预算太小端点装不下完整工具调用,会静默降级成纯文本回答 ——表现为『模型永远不调工具』,
+   * 然后在文字里假装『海报已经生成』。详见 src/llm.ts askLLM 注释。
+   * 改完重启生效,不用 rebuild dist。
+   */
+  LLM_MAX_TOKENS: Number(process.env.LLM_MAX_TOKENS) || 8192,
 
   // 客资多维表格(留空 = 只入 SQLite,跳过飞书表格双写)
   BITABLE_CUSTOMER_APP_TOKEN: process.env.BITABLE_CUSTOMER_APP_TOKEN || '',

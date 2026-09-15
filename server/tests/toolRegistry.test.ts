@@ -282,7 +282,37 @@ test('事实接管:LLM 嘴上说"生成出图"但账本无写工具 → 戳穿�
   assert.ok(!out.includes('客资'))
 })
 
+test('事实接管:简中"海报已经生成"等带副词的完成态变体也要戳穿', async () => {
+  // 回归用例:2026-09-15 修 CLAIMS_PLATES 漏判 ——"已生成"中间隔了"经"会漏;
+  // 同时验证"已经发送了海报""已经发了海报""帮你生成"等常见自然语言变体都被覆盖
+  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
+  const variants = [
+    '海报已经生成发到群里啦',
+    '海報已經生成發到群裡啦',
+    '已经发送了海报',
+    '已经发了海报',
+    '帮你生成好啦',
+    '我帮你出图给你啦',
+  ]
+  for (const text of variants) {
+    const out = buildSystemAttestation([], text)
+    assert.ok(out.includes('未生成任何靓号海报'), `应该戳穿但漏了:${text}`)
+  }
+})
+
 test('事实接管:正常聊天提到"图"字但无生成声称 → 不误伤', async () => {
   const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
   assert.equal(buildSystemAttestation([], '你可以把图片发给我看看'), '')
+})
+
+test('事实接管:CLAIMS_PLATES 不误伤普通聊天(含"出发你"等近似词)', async () => {
+  const { buildSystemAttestation } = await import('../src/llm/toolRegistry.js')
+  const benign = [
+    '明天出发你们记得带伞',
+    '几点出发你们定一下',
+    '生成二维码的网站发我一份',
+  ]
+  for (const text of benign) {
+    assert.equal(buildSystemAttestation([], text), '', `误伤了:${text}`)
+  }
 })

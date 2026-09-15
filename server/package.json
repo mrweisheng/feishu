@@ -7,7 +7,9 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsup",
     "start": "node dist/index.js",
-    "test": "node --test --import tsx tests/**/*.test.ts"
+    "test": "node --test --import tsx tests/**/*.test.ts",
+    "deploy": "npm run build && pm2 restart feishu-server",
+    "deploy:logs": "pm2 logs feishu-server --lines 80"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.7",

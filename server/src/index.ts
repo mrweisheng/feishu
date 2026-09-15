@@ -69,6 +69,15 @@ await mastraServer.init()
 // 3. 启动飞书 worker(长连接 + 历史补漏调度),与 HTTP 并行
 startFeishuWorker()
 
+// LLM 关键配置自检 —— 打印到启动日志,运维一眼能核对
+// (尤其是 LLM_MAX_TOKENS,改完 .env 后忘重启 / dist 没 rebuild,都会在这里立刻暴露;
+//  2026-09-15 靓号假出图事故就是因此:源码改了 8192 但 dist 还在 1000,生产默默跑错版本)
+const llmEndpoint = config.ANTHROPIC_BASE_URL.replace(/\/+$/, '')
+console.log(`🤖 LLM:${config.LLM_MODEL} @ ${llmEndpoint} · max_tokens=${config.LLM_MAX_TOKENS}`)
+if (config.LLM_MAX_TOKENS < 4096) {
+  console.warn(`⚠️ LLM_MAX_TOKENS=${config.LLM_MAX_TOKENS} 过小,工具调用多/入参大时(如靓号 17 个车牌)端点会静默降级成纯文本,模型嘴上说『已生成』但没真调工具。强烈建议 ≥ 8192。`)
+}
+
 serve({ fetch: app.fetch, port: config.PORT, hostname: config.HOST }, (info) => {
   const host = config.HOST.includes(':') ? `[${config.HOST}]` : config.HOST
   console.log(`✅ HTTP 服务监听 http://${host}:${info.port}`)
