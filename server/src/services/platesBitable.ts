@@ -30,6 +30,7 @@ interface DailyRecordGroup {
 interface BitableState {
   appToken?: string
   tableId?: string
+  appUrl?: string
 }
 
 const TABLE_NAME = '最新現牌'
@@ -120,6 +121,26 @@ async function ensureTable(appToken: string): Promise<string> {
   return tableId
 }
 
+/** 拿多维表格的访问链接(自建 app 也会返回 url),失败返回 null */
+async function getAppUrl(appToken: string): Promise<string | null> {
+  const state = loadState()
+  if (state.appUrl) return state.appUrl
+  try {
+    const res: any = await apiClient.request({
+      method: 'GET',
+      url: `/open-apis/bitable/v1/apps/${appToken}`,
+    })
+    const url = res?.data?.app?.url
+    if (url) {
+      state.appUrl = url
+      saveState(state)
+    }
+    return url ?? null
+  } catch {
+    return null
+  }
+}
+
 /** 清空表里全部旧记录(list → batch_delete,每批 500) */
 async function clearTableRecords(appToken: string, tableId: string): Promise<number> {
   const res: any = await apiClient.request({
@@ -140,13 +161,13 @@ async function clearTableRecords(appToken: string, tableId: string): Promise<num
 
 /**
  * 把最新一批候选写入多维表格「最新現牌」表(先清空再写入,表里永远只有最新一次的)。
- * best-effort:失败只记日志,不影响海报出图。
+ * 返回多维表格链接(发海报时附上);失败返回 null,best-effort 不影响海报出图。
  */
 export async function writeDailyRecordsToBitable(
   dateKey: string,
   groups: DailyRecordGroup[],
-): Promise<void> {
-  if (!groups.length) return
+): Promise<string | null> {
+  if (!groups.length) return null
   try {
     const appToken = await ensureAppToken()
     const tableId = await ensureTable(appToken)
@@ -179,10 +200,12 @@ export async function writeDailyRecordsToBitable(
     }
     const selected = groups.reduce((n, g) => n + g.selectedNumbers.length, 0)
     console.log(`📊 靓号数据已入库多维表格: 清空 ${removed} 行旧记录,写入 ${records.length} 行最新候选(精選 ${selected})`)
+    return await getAppUrl(appToken)
   } catch (err: any) {
     console.error('【靓号多维表格入库失败】(不影响海报出图)', err?.response?.data?.msg || (err?.message ?? err))
     if (err?.response?.data?.code === 99991672) {
       console.error('👉 多维表格权限不足:到飞书开放平台给应用开通 bitable:app 权限后重跑即可')
     }
+    return null
   }
 }

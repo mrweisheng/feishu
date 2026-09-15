@@ -47,8 +47,8 @@ function visibleScore(masked: string): number {
   return score
 }
 
-export function maskPlateNumber(number: string): string {
-  let best = { idx: -1, masked: '', score: -Infinity }
+export function maskPlateNumber(number: string, avoid: string[] = []): string {
+  const candidates: { masked: string; score: number }[] = []
   for (let i = 0; i < number.length; i++) {
     const chars = number.split('')
     const hidden = chars[i]
@@ -57,9 +57,11 @@ export function maskPlateNumber(number: string): string {
     let score = visibleScore(masked)
     if (hidden === '4') score += 60 // 同分优先遮 4
     if (/[A-Za-z]/.test(hidden)) score += 30 // 同分优先遮字母
-    if (score > best.score) best = { idx: i, masked, score }
+    candidates.push({ masked, score })
   }
-  return best.masked
+  candidates.sort((a, b) => b.score - a.score)
+  // avoid:已展示的打码形态(两张海报位遮码不能长得一样,否则像重复号)
+  return (candidates.find((c) => !avoid.includes(c.masked)) ?? candidates[0]).masked
 }
 
 export interface DailyPlateCardOptions {

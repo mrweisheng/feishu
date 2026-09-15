@@ -55,14 +55,20 @@ export async function replyPostWithImage(
 }
 
 /**
- * 主动发送一条富文本(post)到指定群(按 chat_id):文字 + 图片。
+ * 主动发送一条富文本(post)到指定群(按 chat_id):文字 + 可选链接 + 图片。
  * 用于跨群输出(如靓号海报发到输出群),不能用 reply(只能同一条消息下回复)。
  */
-export async function sendPostWithImage(chatId: string, imageKey: string, text: string): Promise<void> {
+export async function sendPostWithImage(
+  chatId: string,
+  imageKey: string,
+  text: string,
+  link?: { text: string; url: string },
+): Promise<void> {
   const content = {
     zh_cn: {
       content: [
         [{ tag: 'text', text: `${text}\n` }],
+        ...(link ? [[{ tag: 'a', text: link.text, href: link.url }]] : []),
         [{ tag: 'img', image_key: imageKey }],
       ],
     },

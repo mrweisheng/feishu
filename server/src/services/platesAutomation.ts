@@ -187,8 +187,7 @@ async function runDailyBatch(chatId: string): Promise<void> {
   // 每个口岸出一张海报,发到输出群(chat_id 直发);精选号留档,供多维表格打勾
   const orderedPorts = [...CANON_PORTS, ...[...byPort.keys()].filter((p) => !CANON_PORTS.includes(p))]
   const donePorts = new Set<string>() // 出图成功 or 合法跳过(候选不足)
-  const selectedByPort = new Map<string, string[]>()
-  let okCount = 0
+  const picksByPort = new Map<string, [PlatePick, PlatePick]>()
   for (const port of orderedPorts) {
     const group = byPort.get(port)
     if (!group) continue
@@ -197,20 +196,39 @@ async function runDailyBatch(chatId: string): Promise<void> {
       donePorts.add(port) // 合法跳过也算处理完,避免每次启动反复重试
       continue
     }
+    picksByPort.set(port, pickBestPlates(group.plates) as [PlatePick, PlatePick])
+  }
+
+  // 先入库拿多维表格链接(海报文案附上),再发海报;入库失败不影响海报
+  const bitableUrl = await writeDailyRecordsToBitable(
+    todayDateKey(),
+    fileGroups.map((g) => ({ ...g, selectedNumbers: (picksByPort.get(g.port) ?? []).map((p) => p.number) })),
+  )
+
+  let okCount = 0
+  for (const port of orderedPorts) {
+    const picks = picksByPort.get(port)
+    if (!picks) continue
     try {
-      const picks = pickBestPlates(group.plates) as [PlatePick, PlatePick]
-      selectedByPort.set(port, picks.map((p) => p.number))
+      // 打码避让:两张海报位的打码形态不能一样(如 9G88/9H88 都遮中间会都变成 9*88)
+      const masked1 = maskPlateNumber(picks[0].number)
+      const masked2 = maskPlateNumber(picks[1].number, [masked1])
+      const maskedLine = picks.map((p, i) => `${p.region}·${i === 0 ? masked1 : masked2}·港`).join(' / ')
       const jpeg = await renderDailyPlateCard({
         port,
         picks,
         dateKey: todayDateKey(),
       })
       const imageKey = await uploadFeishuImage(jpeg)
-      const maskedLine = picks.map((p) => `${p.region}·${maskPlateNumber(p.number)}·港`).join(' / ')
-      await sendPostWithImage(config.PLATES_OUTPUT_CHAT_ID, imageKey, `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}),海報如下 👇`)
+      await sendPostWithImage(
+        config.PLATES_OUTPUT_CHAT_ID,
+        imageKey,
+        `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}) 👇`,
+        bitableUrl ? { text: '📋 完整候選清單(最新現牌)', url: bitableUrl } : undefined,
+      )
       donePorts.add(port)
       okCount++
-      console.log(`🖼️ 靓号海报已发送: ${port}, 候选 ${group.plates.length} 个, picks=`, picks.map((p) => `${p.number}(→${maskPlateNumber(p.number)})`))
+      console.log(`🖼️ 靓号海报已发送: ${port}, 候选 ${byPort.get(port)!.plates.length} 个, picks= [${picks[0].number}(→${masked1}), ${picks[1].number}(→${masked2})]`)
     } catch (err: any) {
       console.error(`【靓号自动化】${port} 出图失败(文件保持未处理,下次补救重试):`, err?.stack ?? err?.message ?? err)
     }
@@ -223,11 +241,5 @@ async function runDailyBatch(chatId: string): Promise<void> {
     if (port && donePorts.has(port)) processed.add(f.messageId)
   }
   saveProcessed(processed)
-
-  // 当天候选入库飞书多维表格(每天一张表,精选打勾);best-effort,失败不影响海报
-  await writeDailyRecordsToBitable(
-    todayDateKey(),
-    fileGroups.map((g) => ({ ...g, selectedNumbers: selectedByPort.get(g.port) ?? [] })),
-  )
   console.log(`📅 靓号自动化:批次完成,${orderedPorts.filter((p) => byPort.has(p)).length} 个口岸,成功出图 ${okCount} 张`)
 }
