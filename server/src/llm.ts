@@ -4,7 +4,10 @@ import { config } from './config.js'
 import { addReminder } from './db/reminders.js'
 import { addLead, getLeadById } from './db/customerLeads.js'
 import { syncLeadToBitable, listExistingNamesOnDate } from './feishu/bitable-customer.js'
-import { downloadMessageImage } from './feishu/media.js'
+import { downloadMessageImage, downloadMessageFile } from './feishu/media.js'
+import { uploadFeishuImage, replyPostWithImage } from './feishu/messages.js'
+import { renderDailyPlateCard, todayDateKey } from './services/dailyPlates.js'
+import { extractDocumentText } from './services/docxText.js'
 import { getWeather, getWeatherForecast } from './services/weather.js'
 import { searchKnowledgeAsText } from './services/knowledge.js'
 import {
@@ -147,6 +150,51 @@ const SEARCH_KNOWLEDGE_TOOL = {
   },
 }
 
+const GENERATE_DAILY_PLATES_TOOL = {
+  name: 'generate_daily_plates',
+  description: '生成「每日靓号推荐」海报图并发到群里。当用户发来口岸+一批两地车牌清单(文字/截图/文档),且候选车牌**至少 2 个**时才调用;只有 1 个候选就不要调,直接回复让对方补齐。你负责:①提取口岸;②从香港人/粤语角度挑出最佳 2 个号(忌 4 及不雅谐音,好 8/9/6 尾、豹子/顺子/一路發类组合,结合批文情况);③把全部候选和你的 2 个精选都通过参数传进来。卡片上的日期由系统自动取今天,你不要传任何日期。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      port: {
+        type: 'string',
+        description: '口岸名(中文),如「蓮塘」「深圳灣」「港珠澳大橋」。素材里写「莲塘」就用「蓮塘」。',
+      },
+      port_en: {
+        type: 'string',
+        description: '口岸英文名(可选),如「Liantang Port」「Shenzhen Bay Port」。拿不准就不传。',
+      },
+      plates: {
+        type: 'array',
+        description: '素材里的全部候选车牌(原样抄录,别漏、别改字)。',
+        items: {
+          type: 'object',
+          properties: {
+            region: { type: 'string', description: '号牌前缀,如「粤Z」' },
+            number: { type: 'string', description: '号牌主体(字母数字),如「JS75」「1688」' },
+            note: { type: 'string', description: '批文/状态备注(可选),如「有批文」「9月3日」「6月24日」。原样抄,系统不管日期。' },
+          },
+          required: ['region', 'number'],
+        },
+      },
+      picks: {
+        type: 'array',
+        description: '你精选的 2 个号(必须来自 plates,按推荐顺序,第 1 个会上「特選」章)。',
+        items: {
+          type: 'object',
+          properties: {
+            region: { type: 'string', description: '号牌前缀' },
+            number: { type: 'string', description: '号牌主体' },
+            reason: { type: 'string', description: '一句话推荐理由(粤语视角,如「一路發,尾 8 大吉」)' },
+          },
+          required: ['region', 'number', 'reason'],
+        },
+      },
+    },
+    required: ['port', 'plates', 'picks'],
+  },
+}
+
 export interface LlmContext {
   originalMessageId: string
   userOpenId: string
@@ -155,6 +203,10 @@ export interface LlmContext {
   voucherImageKeys: string[]
   /** 每张图对应的 message_id(补录模式下,父消息的图要用父消息 id 下载,不能混用) */
   imageMessageIds?: string[]
+  /** 消息里的文件(file 类型消息,如车牌清单文档) */
+  voucherFileKeys?: { key: string; name: string }[]
+  /** 每个文件对应的 message_id(同 imageMessageIds 道理) */
+  fileMessageIds?: string[]
 }
 
 /**
@@ -283,6 +335,76 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
       console.error('【知识库检索失败】query=', query, 'msg:', err.message)
       record({ tool: name, category: 'read', ok: false, error: err.message })
       return JSON.stringify({ ok: false, error: `知识库检索失败: ${err.message}` })
+    }
+  }
+  if (name === 'generate_daily_plates') {
+    const { port, port_en, plates, picks } = input as {
+      port: string
+      port_en?: string
+      plates?: { region: string; number: string; note?: string }[]
+      picks?: { region: string; number: string; reason?: string }[]
+    }
+
+    const portName = (port || '').trim()
+    const pickList = Array.isArray(picks) ? picks : []
+    const candidates = Array.isArray(plates) ? plates : []
+
+    if (!portName) {
+      record({ tool: name, category: 'write', ok: false, error: '口岸为空' })
+      return JSON.stringify({ ok: false, error: '口岸名不能为空,请从素材里提取口岸' })
+    }
+    // 模板上固定要放 2 个号:候选不足 2 个时不生成、不记账(不算失败,避免"系统核对"误报),
+    // 让 LLM 自然回复请对方补齐清单。
+    if (candidates.length < 2) {
+      console.log(`⏭️ 靓号推荐跳过:候选车牌只有 ${candidates.length} 个,不足 2 个`)
+      return JSON.stringify({
+        ok: false,
+        insufficient: true,
+        error: `候选车牌只有 ${candidates.length} 个,至少要 2 个才能生成靓号推荐(海报需要 2 个号对比展示)。不要调本工具了,直接口语回复用户,请他补齐车牌清单后再发一次。`,
+      })
+    }
+    if (pickList.length !== 2) {
+      record({ tool: name, category: 'write', ok: false, error: `精选数量=${pickList.length}` })
+      return JSON.stringify({ ok: false, error: `picks 必须恰好 2 个号(当前 ${pickList.length} 个),请重新调用` })
+    }
+    // 精选必须是候选的子号(防 LLM 幻觉出不存在的号直接上海报)
+    const normPlate = (p: { region: string; number: string }) => `${(p.region || '').replace(/\s+/g, '')}${(p.number || '').replace(/\s+/g, '')}`.toUpperCase()
+    const candidateSet = new Set(candidates.map(normPlate))
+    for (const p of pickList) {
+      if (!candidateSet.has(normPlate(p))) {
+        record({ tool: name, category: 'write', ok: false, error: `精选 ${normPlate(p)} 不在候选里` })
+        return JSON.stringify({ ok: false, error: `精选的 ${normPlate(p)} 不在 plates 候选清单里,不能编号,请从候选里重新挑` })
+      }
+    }
+
+    try {
+      // 卡片日期 = 发消息当天(北京时间),与素材里的日期无关
+      const jpeg = await renderDailyPlateCard({
+        port: portName,
+        portEn: port_en?.trim() || undefined,
+        picks: pickList.map((p) => ({ region: (p.region || '').trim(), number: (p.number || '').trim() })) as [{ region: string; number: string }, { region: string; number: string }],
+        dateKey: todayDateKey(),
+      })
+      const imageKey = await uploadFeishuImage(jpeg)
+      const pickLine = pickList.map((p) => `${p.region}·${p.number}`).join(' / ')
+      await replyPostWithImage(
+        ctx.originalMessageId,
+        ctx.userOpenId,
+        imageKey,
+        `🇭🇰 ${portName}口岸 今日靚號已精選(${pickLine}),海報如下 👇`,
+      )
+      record({
+        tool: name,
+        category: 'write',
+        ok: true,
+        summary: `${portName}口岸·${pickList.map((p) => `${p.region}${p.number}`).join('/')}`,
+      })
+      console.log(`🖼️ 靓号海报已回复: port=${portName}, picks=`, pickList.map((p) => p.number))
+      return JSON.stringify({ ok: true, image_sent: true, date_on_card: todayDateKey() })
+    } catch (err: any) {
+      console.error('【靓号海报生成/发送失败】', err?.stack ?? err?.message ?? err)
+      record({ tool: name, category: 'write', ok: false, error: err.message })
+      return JSON.stringify({ ok: false, error: `海报生成或发送失败: ${err.message}` })
     }
   }
   if (name === 'record_customer_info') {
@@ -427,6 +549,20 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · 每条都调一次 record_customer_info(可以并行 8-10 个 tool_use block);lead_date 传当天 00:00:00 +08:00 的 ISO 字符串(YYYY-MM-DDTHH:mm:ss+08:00,工具内部会转);customer_name 传整段客户名称(上一条规则);is_key_customer 和 visited_store 都不传(默认 false);customer_wechat 图里有就填,没就空;customer_notes **只有用户明确说"备注:xxx""笔记:xxx""补充:xxx"时才填,别瞎编**(图片识别时一律不传)。
   · 录完用自然的话告诉用户(如"帮你登记啦,系统会核对条数贴在下面"),**不要自己数数、不要说"已登记 N 条"、不要贴链接** —— 条数和链接由系统核对段自动追加,你说了也会被覆盖/清洗。
   · 看 tool result 的 bitable_synced 字段:任一 false 就告诉用户"飞书表格同步失败,本地 SQLite 里有,需要排查",但具体几条成功以系统核对段为准。
+- 生成每日靓号推荐:用户发来「口岸 + 一批两地车牌清单」(可能是一段文字、一张截图、一个文档)并 @你,意图就是让你挑靓号出图 → 调 generate_daily_plates。判断特征:内容里有口岸名(莲塘/深圳湾/港珠澳大桥/文锦渡/皇岗/罗湖/福田/沙头角等)和 3 个以上车牌号(粤Z 开头)。
+  · **先提取口岸**(注意繁简:「莲塘」→ 传「蓮塘」);候选车牌**原样全部抄进 plates**,一个不漏、不改字,批文/状态备注(如「有批文」「9月3日」)抄进 note。
+  · **⚠️ 候选车牌不足 2 个时,绝对不要调本工具**,直接口语回复:靓号推荐至少要有 2 个候选才能对比着挑,请对方把清单补全再发(哪怕把现有的 1 个先留着)。
+  · **素材里的日期一概不管**:那是批文/现牌日期,不影响出图;卡片日期系统自动取今天,你不要传、也不要在文案里复述素材日期当作"今天"。
+  · **从香港人/粤语角度挑 2 个最佳靓号**放进 picks(第 1 个上「特選」章)。价值排序(从高到低):
+    - 豹子号/多叠号最贵:888、999、666、88、99;尾 8(發)> 尾 9(久)> 尾 6(祿/顺)。
+    - 顺子/递增号次之:168(一路發)、678、789、6789、2345。
+    - 短而齐的号加分:号码位数越短越稀有(如 Z5E00);叠字母(如 BB、AA)也是亮点。
+    - **大忌**:任何含 4 的组合(4=死、14=要死、74=气死、X4 尾),除非全部候选都带 4,否则绝不选;含 4 的那张要在 reason 里说明是"避无可避才选、已是最少 4"。
+    - **粤语谐音要避**:3 在粤语语境常联想「慘」,普通客户不爱,别当卖点;不雅组合 2B/SB/WC/PK/250/749 一票否决,若清单里只有这类,宁可选相对干净但不突出的,并在 reason 里如实说。
+    - 字母数字组合读出来的粤语谐音也要过一遍脑(如 5=唔、9=狗/久、7=柒——单 7 结尾尽量避)。
+    - 结合批文情况:同等靓度优先「有批文」或批文日期更近的(上牌快);这层权衡写进 reason。
+    - reason 用一句话粤语生意口吻,如「一路發,尾 8 大吉,仲有批文上牌快」。
+  · 工具执行成功会自动把海报图回复到群里并 @发送人;你之后只需用一两句自然的话介绍你的 2 个精选和理由,不要自己再描述日期,不要贴任何链接。工具失败就道歉并让用户重发。
 - 查询知识库:知识库是公司自己维护的资料(产品说明、业务流程、报价规则、常见问答、内部规定等),由同事在管理页录入,**不是群里的聊天记录**。当用户问的是这类"有标准答案、需要查资料"的问题(如"XX流程怎么走""XX多少钱""XX的规定是什么")时调用 search_knowledge_base。
   · **查到结果**:基于结果回答,并说明出自哪篇资料(工具返回里有 source 字段)。不要把检索内容当自己知道的事,要说明是查到的。
   · **查不到**:直接说"知识库里还没有这部分内容",**绝对不要凭印象编造**。可以补一句让同事去管理页补录。
@@ -455,6 +591,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
         GET_WEATHER_TOOL,
         GET_WEATHER_FORECAST_TOOL,
         RECORD_CUSTOMER_INFO_TOOL,
+        GENERATE_DAILY_PLATES_TOOL,
         // 知识库关闭时整个工具不下发,LLM 也就不会去调
         ...(config.KB_ENABLED ? [SEARCH_KNOWLEDGE_TOOL] : []),
       ],
@@ -514,8 +651,27 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
 // 缺图就只是 text,缺文就只是图,两者都缺基本不会出现(handler 已早退)
 async function buildUserContent(question: string, ctx: LlmContext): Promise<Anthropic.MessageParam['content']> {
   const content: Anthropic.MessageParam['content'] = []
-  if (question.trim()) {
-    content.push({ type: 'text', text: question })
+  let text = question
+
+  // 消息里带文档(file 类型):下载并提取纯文字拼进正文,LLM 才"读得懂"文档
+  if (ctx.voucherFileKeys?.length) {
+    for (let i = 0; i < ctx.voucherFileKeys.length; i++) {
+      const f = ctx.voucherFileKeys[i]
+      const messageId = ctx.fileMessageIds?.[i] || ctx.originalMessageId
+      const buf = await downloadMessageFile(messageId, f.key)
+      if (!buf) {
+        text += `\n\n【文档:${f.name}】(下载失败,无法读取内容)`
+        continue
+      }
+      const docText = extractDocumentText(f.name, buf)
+      text += docText
+        ? `\n\n【文档:${f.name} 的内容】\n${docText}`
+        : `\n\n【文档:${f.name}】(暂不支持该格式的解析,仅支持 docx/txt/md/csv)`
+    }
+  }
+
+  if (text.trim()) {
+    content.push({ type: 'text', text })
   }
   if (ctx.voucherImageKeys && ctx.voucherImageKeys.length) {
     console.log('📷 收到', ctx.voucherImageKeys.length, '张图片,开始下载并附带给 LLM...')

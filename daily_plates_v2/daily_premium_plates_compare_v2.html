@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>靚號封面 V2 · 風格切換台</title>
+<meta name="theme-color" content="#FFFFFF">
+<style>
+:root{
+  --bg:#FFFFFF;
+  --fg:#09090B;
+  --muted:#F4F4F5;
+  --muted-fg:#71717A;
+  --border:#E4E4E7;
+  --accent:#2563EB;
+  --radius:10px;
+  --sans:"PingFang HK","PingFang TC","Noto Sans TC","Microsoft JhengHei",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:#FAFAFA;
+  color:var(--fg);
+  font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+  padding-bottom:56px;
+}
+
+.bar{
+  position:sticky;
+  top:0;
+  z-index:50;
+  background:rgba(255,255,255,.92);
+  backdrop-filter:saturate(1.6) blur(8px);
+  border-bottom:1px solid var(--border);
+  padding:14px 24px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  flex-wrap:wrap;
+}
+.bar h1{font-size:15px;font-weight:600;letter-spacing:.01em}
+.bar .sub{font-size:12px;color:var(--muted-fg);margin-top:3px}
+
+.seg{
+  display:inline-flex;
+  gap:4px;
+  padding:3px;
+  background:var(--muted);
+  border-radius:var(--radius);
+}
+.seg button{
+  appearance:none;
+  border:0;
+  background:transparent;
+  border-radius:7px;
+  padding:7px 13px;
+  font:inherit;
+  font-size:13px;
+  font-weight:500;
+  color:var(--muted-fg);
+  cursor:pointer;
+  white-space:nowrap;
+  transition:background .15s, color .15s, box-shadow .15s;
+}
+.seg button:hover{color:var(--fg)}
+.seg button.on{
+  background:#fff;
+  color:var(--fg);
+  box-shadow:0 1px 2px rgba(0,0,0,.07);
+}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+.hint{
+  font-size:12px;
+  color:var(--muted-fg);
+  padding:14px 24px 0;
+  max-width:1680px;
+  margin:0 auto;
+}
+kbd{
+  font:inherit;
+  font-size:11px;
+  background:var(--muted);
+  border:1px solid var(--border);
+  border-radius:5px;
+  padding:1px 5px;
+  font-variant-numeric:tabular-nums;
+}
+
+.stage{
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:20px;
+  max-width:1680px;
+  margin:16px auto 0;
+  padding:0 24px;
+}
+body.single .stage{
+  grid-template-columns:1fr;
+  max-width:600px;
+}
+body.single .stage figure:not(.active){display:none}
+
+figure{
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  overflow:hidden;
+  background:#fff;
+  box-shadow:0 1px 2px rgba(0,0,0,.05);
+  display:flex;
+  flex-direction:column;
+}
+figcaption{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:10px 12px;
+  border-bottom:1px solid var(--border);
+  font-size:12px;
+  color:var(--muted-fg);
+  line-height:1.4;
+}
+figcaption b{
+  flex:none;
+  font-size:11px;
+  font-weight:600;
+  color:var(--fg);
+  background:var(--muted);
+  border-radius:6px;
+  padding:3px 7px;
+  font-variant-numeric:tabular-nums;
+}
+figcaption .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.swatches{display:flex;gap:4px;margin-left:auto;flex:none}
+.swatches i{width:12px;height:12px;border-radius:3px;border:1px solid rgba(0,0,0,.08)}
+.frame{aspect-ratio:3/4;background:#fff}
+.frame iframe{width:100%;height:100%;border:0;display:block}
+
+@media (max-width:1400px){ .stage{grid-template-columns:repeat(2,1fr)} }
+@media (max-width:760px){
+  .bar{align-items:flex-start;flex-direction:column}
+  .stage{grid-template-columns:1fr;padding:0 16px}
+  .hint{padding:12px 16px 0}
+}
+</style>
+</head>
+<body data-view="all">
+
+<header class="bar">
+  <div>
+    <h1>靚號封面 V2 · 風格切換台</h1>
+    <div class="sub">數字即主角 · 強字號對比 · 配色 ≤3 色 · 金色只做細線 —— 同 3:4 畫布四款新風格</div>
+  </div>
+  <nav class="seg" id="seg">
+    <button data-view="all" class="on">並排對比</button>
+    <button data-view="01">01 燕麥駝棕</button>
+    <button data-view="02">02 畫廊白</button>
+    <button data-view="03">03 酒紅絲絨</button>
+    <button data-view="04">04 克萊因藍</button>
+  </nav>
+</header>
+
+<p class="hint">鍵盤 <kbd>1</kbd>–<kbd>4</kbd> 單獨看某一款，<kbd>0</kbd> 回到並排對比。</p>
+
+<div class="stage" id="stage">
+
+  <figure data-id="01">
+    <figcaption>
+      <b>01</b><span class="name">燕麥駝棕 · 編輯式排版 · 暖調淺底</span>
+      <span class="swatches">
+        <i style="background:#EFE6D6"></i><i style="background:#43301C"></i><i style="background:#A9743C"></i>
+      </span>
+    </figcaption>
+    <div class="frame"><iframe src="daily_premium_plates_v2_01_onyx.html" title="風格 01" loading="lazy"></iframe></div>
+  </figure>
+
+  <figure data-id="02">
+    <figcaption>
+      <b>02</b><span class="name">畫廊白 · 美術館留白 · 展簽排版</span>
+      <span class="swatches">
+        <i style="background:#F4F1EA"></i><i style="background:#1C1A17"></i><i style="background:#B5432C"></i>
+      </span>
+    </figcaption>
+    <div class="frame"><iframe src="daily_premium_plates_v2_02_gallery.html" title="風格 02" loading="lazy"></iframe></div>
+  </figure>
+
+  <figure data-id="03">
+    <figcaption>
+      <b>03</b><span class="name">酒紅絲絨 · 金徽章 · 老錢對稱構圖</span>
+      <span class="swatches">
+        <i style="background:#571C2B"></i><i style="background:#F1E8D6"></i><i style="background:#C9A85C"></i>
+      </span>
+    </figcaption>
+    <div class="frame"><iframe src="daily_premium_plates_v2_03_emerald.html" title="風格 03" loading="lazy"></iframe></div>
+  </figure>
+
+  <figure data-id="04">
+    <figcaption>
+      <b>04</b><span class="name">克萊因藍 · 大色塊衝擊 · 冰白車牌</span>
+      <span class="swatches">
+        <i style="background:#002FA7"></i><i style="background:#FAFAF7"></i><i style="background:#E3C983"></i>
+      </span>
+    </figcaption>
+    <div class="frame"><iframe src="daily_premium_plates_v2_04_express.html" title="風格 04" loading="lazy"></iframe></div>
+  </figure>
+
+</div>
+
+<script>
+(function () {
+  var body = document.body;
+  var seg = document.getElementById('seg');
+  var figures = Array.prototype.slice.call(document.querySelectorAll('.stage figure'));
+  var tabs = Array.prototype.slice.call(seg.querySelectorAll('button'));
+
+  function setView(view) {
+    body.dataset.view = view;
+    body.classList.toggle('single', view !== 'all');
+    tabs.forEach(function (b) { b.classList.toggle('on', b.dataset.view === view); });
+    figures.forEach(function (f) {
+      f.classList.toggle('active', view === 'all' || f.dataset.id === view);
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  seg.addEventListener('click', function (e) {
+    var btn = e.target.closest('button');
+    if (btn) setView(btn.dataset.view);
+  });
+
+  var map = { '1': '01', '2': '02', '3': '03', '4': '04', '0': 'all' };
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var v = map[e.key];
+    if (v) setView(v);
+  });
+})();
+</script>
+
+</body>
+</html>

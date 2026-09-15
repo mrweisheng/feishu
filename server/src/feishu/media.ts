@@ -87,6 +87,33 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
   return Buffer.concat(chunks)
 }
 
+/**
+ * 下载消息里的文件(file 类型消息,如文档)。上限 10MB,超过直接拒(车牌清单文档远用不了这么大)。
+ */
+export async function downloadMessageFile(messageId: string, fileKey: string): Promise<Buffer | null> {
+  try {
+    const res: any = await apiClient.im.messageResource.get({
+      params: { type: 'file' },
+      path: { message_id: messageId, file_key: fileKey },
+    })
+    const stream: Readable | undefined = res?.getReadableStream?.()
+    if (!stream) {
+      console.warn('【下载文件】无 readable stream,messageId=', messageId, 'fileKey=', fileKey)
+      return null
+    }
+    const raw = await streamToBuffer(stream)
+    if (raw.length > 10 * 1024 * 1024) {
+      console.warn('【下载文件】超过 10MB 上限,messageId=', messageId)
+      return null
+    }
+    return raw
+  } catch (err: any) {
+    console.error('【下载文件失败】messageId=', messageId, 'fileKey=', fileKey,
+      'code:', err.response?.data?.code, 'msg:', err.response?.data?.msg || err.message)
+    return null
+  }
+}
+
 // 看 magic bytes 识别图片格式;不识别就当 jpeg
 function detectMediaType(buf: Buffer): ImageMediaType {
   if (buf.length >= 4) {

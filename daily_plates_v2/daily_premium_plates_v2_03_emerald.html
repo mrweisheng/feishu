@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 酒紅絲絨 —— 明哥中港牌</title>
+<style>
+/* ============================================================
+   V2-03 · 酒紅絲絨 (Velvet Burgundy)
+   深酒紅 + 奶油字 + 金色徽章，老錢感對稱構圖（避開綠色忌諱）
+   標題大而醒目 · 固定推薦兩個號 · 真實牌樣式
+   ============================================================ */
+:root{
+  --pine:#571C2B;
+  --pine-deep:#380F19;
+  --pine-lit:#732838;
+  --cream:#F1E8D6;
+  --cream-dim:rgba(241,232,214,.7);
+  --gold:#C9A85C;
+  --plate:#111111;
+  --sans:"PingFang HK","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+  --serif:"Songti TC","Noto Serif TC","STSong","SimSun",serif;
+  --num:"Helvetica Neue",Helvetica,Arial,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  min-height:100vh;
+  display:flex;align-items:center;justify-content:center;
+  padding:20px;background:#240A10;
+  font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+
+.canvas{
+  container-type:inline-size;
+  position:relative;
+  width:min(100%,1080px,calc((100vh - 40px)*3/4));
+  aspect-ratio:3/4;
+  overflow:hidden;
+  border-radius:1.8cqw;
+  display:flex;flex-direction:column;align-items:center;
+  padding:5.2cqw 6.4cqw;
+  color:var(--cream);
+  text-align:center;
+  background:
+    radial-gradient(74% 44% at 50% 0%,  rgba(140,52,74,.6), rgba(140,52,74,0) 66%),
+    radial-gradient(58% 34% at 50% 104%, rgba(90,30,44,.65), rgba(90,30,44,0) 70%),
+    linear-gradient(170deg,var(--pine-lit) 0%,var(--pine) 46%,var(--pine-deep) 100%);
+}
+.canvas::before{
+  content:"";position:absolute;inset:0;z-index:0;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:160px 160px;opacity:.2;mix-blend-mode:overlay;pointer-events:none;
+}
+.canvas::after{
+  content:"";position:absolute;inset:2.6cqw;z-index:3;
+  border:1px solid rgba(201,168,92,.42);
+  outline:1px solid rgba(201,168,92,.16);
+  outline-offset:.9cqw;pointer-events:none;
+}
+.canvas > *{position:relative;z-index:1}
+
+/* ---- LOGO + 飾線 ---- */
+.logo{width:50cqw;display:block;filter:brightness(1.06)}
+.orn{margin-top:3.4cqw;display:flex;align-items:center;gap:2.6cqw}
+.orn::before,.orn::after{content:"";width:11cqw;height:1px;background:linear-gradient(90deg,transparent,rgba(201,168,92,.75))}
+.orn::after{background:linear-gradient(90deg,rgba(201,168,92,.75),transparent)}
+.orn i{width:1.4cqw;height:1.4cqw;background:var(--gold);transform:rotate(45deg)}
+
+/* ---- 大標題（襯線，老錢感） ---- */
+h1.title{
+  margin-top:4.6cqw;
+  font-family:var(--serif);
+  font-size:8.8cqw;font-weight:900;letter-spacing:.12em;text-indent:.12em;
+  line-height:1.2;color:var(--cream);
+}
+.port{
+  margin-top:2cqw;
+  display:inline-flex;align-items:center;gap:2.8cqw;
+  font-size:3.4cqw;font-weight:700;letter-spacing:.4em;text-indent:.4em;
+  color:var(--gold);
+}
+.port::before,.port::after{content:"";width:8cqw;height:1px;background:rgba(201,168,92,.6)}
+
+/* ---- 兩塊真實車牌 ---- */
+.plates{
+  flex:1;width:100%;
+  display:flex;flex-direction:column;justify-content:center;gap:4.4cqw;min-height:0;
+  padding:2cqw 0;
+}
+.plate{
+  position:relative;
+  width:84%;margin:0 auto;aspect-ratio:3.6/1;
+  background:linear-gradient(180deg,#7A2C3E 0%,#571C2B 55%,#3A121D 100%);
+  border-radius:1cqw;
+  display:flex;align-items:center;justify-content:center;gap:2.6cqw;
+  box-shadow:
+    0 2.4cqw 4.6cqw -1.8cqw rgba(0,0,0,.55),
+    inset 0 .3cqw .5cqw -.2cqw rgba(241,232,214,.35),
+    inset 0 -.3cqw .5cqw -.2cqw rgba(0,0,0,.5);
+}
+.plate::before{
+  content:"";position:absolute;inset:.9cqw;border-radius:.6cqw;
+  border:1px solid rgba(201,168,92,.6);pointer-events:none;
+}
+.plate .region,.plate .digits,.plate .suffix{
+  font-family:var(--num);color:var(--cream);line-height:1;font-variant-numeric:tabular-nums;
+}
+.plate .region{font-size:6.6cqw;font-weight:800;letter-spacing:.06em}
+.plate .digits{font-size:6.6cqw;font-weight:800;letter-spacing:.1em}
+.plate .suffix{font-size:6.6cqw;font-weight:800}
+.plate .pick{
+  position:absolute;top:-2.4cqw;right:2.2cqw;z-index:2;
+  width:9.6cqw;height:9.6cqw;border-radius:50%;
+  border:1px solid var(--gold);
+  display:flex;align-items:center;justify-content:center;
+  font-size:2.4cqw;font-weight:800;letter-spacing:.14em;text-indent:.14em;
+  color:var(--gold);
+  background:rgba(56,15,25,.9);
+}
+.plate .pick::after{
+  content:"";position:absolute;inset:.7cqw;border-radius:50%;
+  border:1px solid rgba(201,168,92,.4);
+}
+
+/* ---- FOOT ---- */
+.foot{
+  width:100%;
+  display:flex;align-items:center;justify-content:space-between;gap:3cqw;
+  padding-top:3.4cqw;
+  border-top:1px solid rgba(201,168,92,.36);
+}
+.foot .brand{font-size:2.5cqw;font-weight:700;letter-spacing:.3em;color:var(--cream)}
+.foot .cta{font-size:2.3cqw;font-weight:600;letter-spacing:.18em;color:var(--gold)}
+</style>
+</head>
+<body>
+
+<div class="canvas">
+
+  <img class="logo" src="./logo横版.png" alt="明哥中港牌">
+  <div class="orn"><i></i></div>
+
+  <h1 class="title">今日靚號推薦</h1>
+  <div class="port">深圳灣口岸</div>
+
+  <div class="plates">
+    <div class="plate">
+      <span class="pick">特選</span>
+      <span class="region">粤Z</span>
+      <span class="digits">1598</span>
+      <span class="suffix">港</span>
+    </div>
+    <div class="plate">
+      <span class="region">粤Z</span>
+      <span class="digits">1688</span>
+      <span class="suffix">港</span>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span class="brand">明哥中港牌</span>
+    <span class="cta">WhatsApp ／ 微信 查詢</span>
+  </div>
+
+</div>
+
+</body>
+</html>

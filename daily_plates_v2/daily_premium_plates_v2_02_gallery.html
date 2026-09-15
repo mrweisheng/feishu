@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 畫廊白極簡 —— 明哥中港牌</title>
+<style>
+/* ============================================================
+   V2-02 · 畫廊白極簡 (Gallery White)
+   暖白 + 炭黑 + 一絲赭紅；標題巨大，數字是展品
+   標題大而醒目 · 固定推薦兩個號 · 真實牌樣式
+   ============================================================ */
+:root{
+  --paper:#F4F1EA;
+  --paper-2:#ECE8DE;
+  --coal:#1C1A17;
+  --coal-soft:#6E6A62;
+  --rust:#B5432C;
+  --plate:#111111;
+  --sans:"PingFang HK","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+  --num:"Helvetica Neue",Helvetica,Arial,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  min-height:100vh;
+  display:flex;align-items:center;justify-content:center;
+  padding:20px;background:#DDD8CD;
+  font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+
+.canvas{
+  container-type:inline-size;
+  position:relative;
+  width:min(100%,1080px,calc((100vh - 40px)*3/4));
+  aspect-ratio:3/4;
+  overflow:hidden;
+  border-radius:.6cqw;
+  display:flex;flex-direction:column;
+  padding:6cqw 7cqw;
+  color:var(--coal);
+  background:linear-gradient(178deg,var(--paper) 0%,var(--paper-2) 100%);
+  box-shadow:0 24px 56px -28px rgba(40,34,24,.4);
+}
+.canvas::before{
+  content:"";position:absolute;inset:3cqw;z-index:3;
+  border:1px solid rgba(28,26,23,.22);pointer-events:none;
+}
+.canvas::after{
+  content:"";position:absolute;inset:0;z-index:0;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:160px 160px;opacity:.16;mix-blend-mode:multiply;pointer-events:none;
+}
+.canvas > *{position:relative;z-index:1}
+
+/* ---- TOP：logo ---- */
+.top{display:flex;justify-content:center;padding:.6cqw 0 0}
+.logo{width:46cqw;display:block}
+
+/* ---- 巨大標題 ---- */
+.title-block{
+  margin-top:4.6cqw;text-align:center;
+}
+.kicker{
+  font-size:2.3cqw;font-weight:700;letter-spacing:.46em;text-indent:.46em;
+  color:var(--coal-soft);
+}
+h1.title{
+  margin-top:1.6cqw;
+  font-size:11cqw;font-weight:900;letter-spacing:.05em;line-height:1.1;
+  color:var(--coal);
+}
+h1.title em{font-style:normal;color:var(--rust)}
+.port{
+  margin-top:1.6cqw;
+  display:inline-flex;align-items:center;gap:2.8cqw;
+  font-size:3.6cqw;font-weight:800;letter-spacing:.32em;text-indent:.32em;
+  color:var(--coal);
+}
+.port::before,.port::after{content:"";width:7cqw;height:1px;background:rgba(28,26,23,.35)}
+
+/* ---- 兩塊真實車牌 ---- */
+.plates{flex:1;display:flex;flex-direction:column;justify-content:center;gap:3.4cqw;min-height:0}
+.plate{
+  position:relative;
+  width:86%;margin:0 auto;aspect-ratio:3.6/1;
+  background:linear-gradient(180deg,#FBF8F1 0%,#F0EBE0 100%);
+  border:.45cqw solid var(--coal);
+  border-radius:1cqw;
+  display:flex;align-items:center;justify-content:center;gap:2.6cqw;
+  box-shadow:0 2.2cqw 4.2cqw -1.8cqw rgba(40,34,24,.35);
+}
+.plate::before{
+  content:"";position:absolute;inset:.9cqw;
+  border:1px solid rgba(28,26,23,.35);pointer-events:none;
+}
+.plate .region,.plate .digits,.plate .suffix{
+  font-family:var(--num);color:var(--coal);line-height:1;font-variant-numeric:tabular-nums;
+}
+.plate .region{font-size:6.6cqw;font-weight:800;letter-spacing:.06em}
+.plate .digits{font-size:6.6cqw;font-weight:800;letter-spacing:.1em}
+.plate .suffix{font-size:6.6cqw;font-weight:800}
+.plate .pick{
+  position:absolute;top:-2.2cqw;right:2.2cqw;z-index:2;
+  font-size:2cqw;font-weight:800;letter-spacing:.3em;text-indent:.3em;
+  color:#FFF6EC;background:var(--rust);
+  padding:1cqw 2.2cqw;border-radius:999px;
+}
+
+/* ---- 底部信息 ---- */
+.label{
+  border-top:1px solid rgba(28,26,23,.18);
+  padding-top:3.2cqw;
+  display:flex;align-items:baseline;justify-content:space-between;gap:3cqw;
+}
+.label .brand{font-size:2.7cqw;font-weight:800;letter-spacing:.3em;color:var(--coal)}
+.label .meta{font-size:2.3cqw;font-weight:600;letter-spacing:.18em;color:var(--coal-soft)}
+</style>
+</head>
+<body>
+
+<div class="canvas">
+
+  <div class="top">
+    <img class="logo" src="./logo横版.png" alt="明哥中港牌">
+  </div>
+
+  <div class="title-block">
+    <div class="kicker">中港兩地牌 · 2026.09.14</div>
+    <h1 class="title">今日靚號<em>推薦</em></h1>
+    <div class="port">深圳灣口岸</div>
+  </div>
+
+  <div class="plates">
+    <div class="plate">
+      <span class="pick">特選</span>
+      <span class="region">粤Z</span>
+      <span class="digits">1598</span>
+      <span class="suffix">港</span>
+    </div>
+    <div class="plate">
+      <span class="region">粤Z</span>
+      <span class="digits">1688</span>
+      <span class="suffix">港</span>
+    </div>
+  </div>
+
+  <div class="label">
+    <span class="brand">明哥中港牌</span>
+    <span class="meta">WhatsApp ／ 微信 查詢</span>
+  </div>
+
+</div>
+
+</body>
+</html>

@@ -105,9 +105,9 @@ function postBlocks(contentObj: any): any[] {
   return Array.isArray(locale?.content) ? locale.content.flat() : []
 }
 
-// 抽取消息的文字 + 图片 file_key(text / post / image 三种类型都覆盖),不做 @机器人 判断。
-// content 解析失败 → 返回 null;文字可能为空字符串(如纯图 post);图片数组可能为空。
-function extractContent(message: any): { text: string; imageKeys: string[] } | null {
+// 抽取消息的文字 + 图片 file_key + 文件(file)列表(text / post / image / file 四种类型都覆盖),
+// 不做 @机器人 判断。content 解析失败 → 返回 null;文字可能为空字符串;图片/文件数组可能为空。
+function extractContent(message: any): { text: string; imageKeys: string[]; fileKeys: { key: string; name: string }[] } | null {
   let contentObj: any
   try {
     contentObj = JSON.parse(message.content)
@@ -116,6 +116,7 @@ function extractContent(message: any): { text: string; imageKeys: string[] } | n
   }
 
   const imageKeys: string[] = []
+  const fileKeys: { key: string; name: string }[] = []
   let text = ''
 
   if (message.message_type === 'text') {
@@ -129,11 +130,15 @@ function extractContent(message: any): { text: string; imageKeys: string[] } | n
     text = text.replace(/@_user_\d+/g, '').trim()
   } else if (message.message_type === 'image') {
     if (typeof contentObj.image_key === 'string') imageKeys.push(contentObj.image_key)
+  } else if (message.message_type === 'file') {
+    if (typeof contentObj.file_key === 'string') {
+      fileKeys.push({ key: contentObj.file_key, name: contentObj.name || '文档' })
+    }
   } else {
     return null
   }
 
-  return { text, imageKeys }
+  return { text, imageKeys, fileKeys }
 }
 
 // 解析消息文本(用于日志展示),失败回退为 [非文本消息]
@@ -162,14 +167,14 @@ function parseMessageText(message: any): string {
 // 用户场景:先发张微信联系人截图(没@机器人),过会儿想起来,回到那条消息选择回复 + @机器人,
 // 这条历史图作为上下文,LLM 自己判断是录线索还是回答问题。
 // 实现:SQLite 优先(归档一直在跑,命中率 99%),查不到再回退飞书 API(机器人入群前的旧消息)。
-async function loadParentContext(parentId: string): Promise<{ text: string; imageKeys: string[] } | null> {
+async function loadParentContext(parentId: string): Promise<{ text: string; imageKeys: string[]; fileKeys: { key: string; name: string }[] } | null> {
   // 1. SQLite 归档优先
   const row = getMessageById(parentId)
   if (row?.content) {
     const c = extractContent({ message_type: row.message_type, content: row.content })
-    if (c && (c.text || c.imageKeys.length)) return c
+    if (c && (c.text || c.imageKeys.length || c.fileKeys.length)) return c
   }
-  // 2. 回退飞书 API(原消息不在库里,如机器人入群前发的旧消息)
+  // 2. 回退飞书 API(原消息不在库里,如机器人入群前的旧消息)
   try {
     const res: any = await apiClient.im.v1.message.get({
       path: { message_id: parentId },
@@ -223,6 +228,8 @@ async function tryAnswerMention(message: any, openId: string): Promise<void> {
   let userText = own?.text ?? ''
   let imageKeys = own?.imageKeys ?? []
   let imageMessageIds: string[] | undefined
+  let fileKeys = own?.fileKeys ?? []
+  let fileMessageIds: string[] | undefined
 
   // 「补录模式」:如果当前消息是「回复某条历史消息」(@机器人时往往没文字,光靠图触发),
   // 把被回复的那条消息作为上下文下载下来喂给 LLM(图片 + 文字合并)。
@@ -243,22 +250,30 @@ async function tryAnswerMention(message: any, openId: string): Promise<void> {
         const parentImageIds = parentCtx.imageKeys.map(() => message.parent_id!)
         imageMessageIds = [...parentImageIds, ...imageKeys.slice(parentCtx.imageKeys.length).map(() => message.message_id)]
       }
+      if (parentCtx.fileKeys.length) {
+        fileKeys = [...parentCtx.fileKeys, ...fileKeys]
+        const parentFileIds = parentCtx.fileKeys.map(() => message.parent_id!)
+        fileMessageIds = [...parentFileIds, ...fileKeys.slice(parentCtx.fileKeys.length).map(() => message.message_id)]
+      }
       console.log('📎 补录模式:载入父消息上下文, parent_id=', message.parent_id,
-        '父消息图', parentCtx.imageKeys.length, '张,文字', parentCtx.text.length, '字')
+        '父消息图', parentCtx.imageKeys.length, '张,文件', parentCtx.fileKeys.length, '个,文字', parentCtx.text.length, '字')
     }
   }
 
-  // 文字和图片都为空 → 纯 @机器人无内容可处理,忽略
-  if (!userText && imageKeys.length === 0) return
+  // 文字和图片、文件都为空 → 纯 @机器人无内容可处理,忽略
+  if (!userText && imageKeys.length === 0 && fileKeys.length === 0) return
 
   if (userText) console.log('🤖 @机器人:', userText)
   else if (imageKeys.length) console.log('🤖 @机器人: [图片 x', imageKeys.length, ']')
+  else if (fileKeys.length) console.log('🤖 @机器人: [文件 x', fileKeys.length, ']')
   const ctx: LlmContext = {
     originalMessageId: message.message_id,
     userOpenId: openId,
     chatId: message.chat_id,
     voucherImageKeys: imageKeys,
     imageMessageIds,
+    voucherFileKeys: fileKeys,
+    fileMessageIds,
   }
 
   try {

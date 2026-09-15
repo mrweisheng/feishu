@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 燕麥駝棕編輯風 —— 明哥中港牌</title>
+<style>
+/* ============================================================
+   V2-01 · 燕麥駝棕編輯風 (Camel Editorial · Premium)
+   高級感配方：
+   · 襯線大標題 + 無襯線正文（高端雜誌排版）
+   · 金棕雙細線畫框 + 燙金漸變點綴（<5%）
+   · 斜向光束 + 暗角，淺底也有縱深
+   · 中英雙語字距排版（編輯部風格）
+   ============================================================ */
+:root{
+  --oat:#EFE6D6;
+  --oat-2:#E6D9C2;
+  --coffee:#43301C;
+  --coffee-soft:#8A7256;
+  --bronze:#A9743C;
+  --gold:#C8A45C;
+  --sans:"PingFang HK","PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+  --serif:"Songti TC","Noto Serif TC","STSong","SimSun",serif;
+  --num:"Helvetica Neue",Helvetica,Arial,sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  min-height:100vh;
+  display:flex;align-items:center;justify-content:center;
+  padding:20px;background:#D9CFBC;
+  font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+
+.canvas{
+  container-type:inline-size;
+  position:relative;
+  width:min(100%,1080px,calc((100vh - 40px)*3/4));
+  aspect-ratio:3/4;
+  overflow:hidden;
+  display:flex;flex-direction:column;
+  padding:7cqw 7.6cqw;
+  color:var(--coffee);
+  background:
+    /* 斜向光束 */
+    linear-gradient(118deg, rgba(255,255,255,0) 46%, rgba(255,252,244,.5) 52%, rgba(255,255,255,0) 60%),
+    /* 光暈 + 暗角 */
+    radial-gradient(80% 44% at 88% 0%,  rgba(255,250,240,.75), rgba(255,250,240,0) 66%),
+    radial-gradient(64% 40% at 0% 100%, rgba(196,158,104,.3),  rgba(196,158,104,0) 70%),
+    radial-gradient(120% 90% at 50% 50%, rgba(0,0,0,0) 62%,   rgba(88,62,28,.1) 100%),
+    linear-gradient(172deg,var(--oat) 0%,var(--oat-2) 100%);
+}
+/* 噪點紙紋 */
+.canvas::before{
+  content:"";position:absolute;inset:0;z-index:0;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:160px 160px;opacity:.2;mix-blend-mode:multiply;pointer-events:none;
+}
+/* 金棕雙細線畫框 */
+.canvas::after{
+  content:"";position:absolute;inset:2.8cqw;z-index:3;
+  border:1px solid rgba(169,116,60,.6);
+  outline:1px solid rgba(169,116,60,.25);
+  outline-offset:.8cqw;
+  pointer-events:none;
+}
+.canvas > *{position:relative;z-index:1}
+
+/* ---- TOP：logo 左 · 期號右 ---- */
+.top{
+  display:flex;align-items:center;justify-content:space-between;
+  padding-bottom:3.6cqw;
+  border-bottom:1px solid rgba(169,116,60,.45);
+}
+.logo{width:40cqw;display:block}
+.issue{
+  font-size:2cqw;font-weight:700;letter-spacing:.3em;text-indent:.3em;
+  color:var(--bronze);text-align:right;line-height:1.9;
+}
+
+/* ---- 標題區（襯線大標題） ---- */
+.title-block{margin-top:5.4cqw}
+.kicker{
+  display:inline-flex;align-items:center;gap:2.4cqw;
+  font-size:2.4cqw;font-weight:700;letter-spacing:.42em;text-indent:.42em;
+  color:var(--bronze);
+}
+.kicker i{width:1.2cqw;height:1.2cqw;background:var(--bronze);transform:rotate(45deg);opacity:.75}
+h1.title{
+  margin-top:2.2cqw;
+  font-family:var(--serif);
+  font-size:10.6cqw;font-weight:900;letter-spacing:.08em;line-height:1.18;
+  color:var(--coffee);
+}
+.title-row{display:flex;align-items:center;gap:3cqw;margin-top:2cqw}
+.port{
+  font-size:4.6cqw;font-weight:800;letter-spacing:.26em;text-indent:.26em;
+  background:linear-gradient(140deg,#C69455 10%,var(--bronze) 45%,#7E5424 90%);
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;
+}
+.port-line{flex:1;height:1px;background:linear-gradient(90deg,var(--bronze),transparent)}
+.en{
+  margin-top:1.8cqw;
+  font-size:1.9cqw;font-weight:600;letter-spacing:.42em;text-indent:.42em;
+  color:var(--coffee-soft);
+}
+
+/* ---- 兩塊真實車牌 ---- */
+.plates{flex:1;display:flex;flex-direction:column;justify-content:center;gap:3.8cqw;min-height:0}
+.plate{
+  position:relative;
+  width:100%;aspect-ratio:3.6/1;
+  background:linear-gradient(180deg,#A5763E 0%,#8A5F2C 55%,#6B4419 100%);
+  border-radius:1cqw;
+  display:flex;align-items:center;justify-content:center;gap:2.6cqw;
+  box-shadow:
+    0 2.6cqw 5cqw -2cqw rgba(67,48,28,.55),
+    inset 0 .3cqw .5cqw -.2cqw rgba(255,244,222,.55),
+    inset 0 -.3cqw .5cqw -.2cqw rgba(60,36,8,.6);
+}
+.plate::before{
+  content:"";position:absolute;inset:.9cqw;border-radius:.6cqw;
+  border:1px solid rgba(255,246,228,.6);pointer-events:none;
+}
+.plate .region,.plate .digits,.plate .suffix{
+  font-family:var(--num);color:#FFF6E6;line-height:1;
+  font-variant-numeric:tabular-nums;
+}
+.plate .region{font-size:7cqw;font-weight:800;letter-spacing:.06em}
+.plate .digits{font-size:7cqw;font-weight:800;letter-spacing:.1em}
+.plate .suffix{font-size:7cqw;font-weight:800}
+.plate .sep{
+  width:1.2cqw;height:1.2cqw;background:rgba(255,246,228,.85);
+  transform:rotate(45deg);flex:none;
+}
+/* 特選：燙金印章 */
+.plate .pick{
+  position:absolute;top:-2.8cqw;right:2.6cqw;z-index:2;
+  width:9.8cqw;height:9.8cqw;border-radius:50%;
+  border:1px solid rgba(169,116,60,.7);
+  display:flex;align-items:center;justify-content:center;
+  font-size:2.3cqw;font-weight:800;letter-spacing:.14em;text-indent:.14em;
+  color:#FFF6E6;
+  background:linear-gradient(150deg,#C89A50,var(--bronze));
+  box-shadow:0 1.4cqw 2.6cqw -1cqw rgba(67,48,28,.55);
+}
+.plate .pick::after{
+  content:"";position:absolute;inset:.7cqw;border-radius:50%;
+  border:1px solid rgba(255,246,228,.55);
+}
+
+/* ---- FOOT ---- */
+.foot{
+  display:flex;align-items:center;justify-content:space-between;gap:3cqw;
+  padding-top:3.4cqw;
+  border-top:1px solid rgba(169,116,60,.45);
+}
+.foot .left{
+  font-size:2.5cqw;font-weight:800;letter-spacing:.28em;color:var(--coffee);
+}
+.foot .cta{font-size:2.4cqw;font-weight:700;letter-spacing:.16em;color:var(--bronze)}
+</style>
+</head>
+<body>
+
+<div class="canvas">
+
+  <div class="top">
+    <img class="logo" src="./logo横版.png" alt="明哥中港牌">
+    <div class="issue">今日精選<br>DAILY</div>
+  </div>
+
+  <div class="title-block">
+    <div class="kicker"><i></i>中港兩地牌 · 2026.09.14</div>
+    <h1 class="title">今日靚號推薦</h1>
+    <div class="title-row">
+      <span class="port">深圳灣口岸</span>
+      <span class="port-line"></span>
+    </div>
+    <div class="en">SHENZHEN BAY · PREMIUM PLATES</div>
+  </div>
+
+  <div class="plates">
+    <div class="plate">
+      <span class="pick">特選</span>
+      <span class="region">粤Z</span>
+      <span class="sep"></span>
+      <span class="digits">1598</span>
+      <span class="sep"></span>
+      <span class="suffix">港</span>
+    </div>
+    <div class="plate">
+      <span class="region">粤Z</span>
+      <span class="sep"></span>
+      <span class="digits">1688</span>
+      <span class="sep"></span>
+      <span class="suffix">港</span>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span class="left">明哥中港牌</span>
+    <span class="cta">WhatsApp ／ 微信 查詢</span>
+  </div>
+
+</div>
+
+</body>
+</html>
