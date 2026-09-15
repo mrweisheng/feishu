@@ -397,12 +397,12 @@ export function startFeishuWorker(): void {
   console.log('⏰ 历史补漏已调度:启动5秒后执行一次,之后每24小时一次')
 
   // 靓号自动化:服务一启动就把今天的现牌消息重放一遍(清除当天标记),上线即验证;
-  // 之后按正常流程标记,处理过的不再重复。等历史补漏入库(3 分钟足够宽裕)后再跑。
+  // 之后按正常流程标记,处理过的不再重复。历史补漏 5 秒就完成,60 秒后执行足够稳。
   if (config.PLATES_SOURCE_CHAT_ID) {
     setTimeout(() => {
       catchUpOnStartup().catch((e: any) => console.error('【靓号自动化启动重放失败】', e?.stack ?? e?.message ?? e))
-    }, 180_000)
-    console.log('⏰ 靓号自动化已调度:启动 3 分钟后重放今天的现牌消息(每次上线即验证)')
+    }, 60_000)
+    console.log('⏰ 靓号自动化已调度:启动 60 秒后重放今天的现牌消息(每次上线即验证)')
   }
 
   // 提醒调度器:每60秒轮询到点的提醒,reply 原消息 @用户
