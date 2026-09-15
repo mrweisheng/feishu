@@ -6,7 +6,7 @@ import { addLead, getLeadById } from './db/customerLeads.js'
 import { syncLeadToBitable, listExistingNamesOnDate } from './feishu/bitable-customer.js'
 import { downloadMessageImage, downloadMessageFile } from './feishu/media.js'
 import { uploadFeishuImage, replyPostWithImage } from './feishu/messages.js'
-import { renderDailyPlateCard, todayDateKey } from './services/dailyPlates.js'
+import { renderDailyPlateCard, todayDateKey, maskPlateNumber } from './services/dailyPlates.js'
 import { extractDocumentText } from './services/docxText.js'
 import { getWeather, getWeatherForecast } from './services/weather.js'
 import { searchKnowledgeAsText } from './services/knowledge.js'
@@ -386,7 +386,9 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
         dateKey: todayDateKey(),
       })
       const imageKey = await uploadFeishuImage(jpeg)
-      const pickLine = pickList.map((p) => `${p.region}·${p.number}`).join(' / ')
+      // 对外一律展示打码号(海报同步打码):防同行比价。遮码规则由代码统一执行。
+      const masked = pickList.map((p) => ({ region: p.region.trim(), number: p.number.trim(), masked: maskPlateNumber(p.number.trim()) }))
+      const pickLine = masked.map((p) => `${p.region}·${p.masked}`).join(' / ')
       await replyPostWithImage(
         ctx.originalMessageId,
         ctx.userOpenId,
@@ -397,10 +399,16 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
         tool: name,
         category: 'write',
         ok: true,
-        summary: `${portName}口岸·${pickList.map((p) => `${p.region}${p.number}`).join('/')}`,
+        summary: `${portName}口岸·${masked.map((p) => `${p.region}${p.masked}`).join('/')}`,
       })
-      console.log(`🖼️ 靓号海报已回复: port=${portName}, picks=`, pickList.map((p) => p.number))
-      return JSON.stringify({ ok: true, image_sent: true, date_on_card: todayDateKey() })
+      console.log(`🖼️ 靓号海报已回复: port=${portName}, picks=`, masked.map((p) => `${p.number}(→${p.masked})`))
+      return JSON.stringify({
+        ok: true,
+        image_sent: true,
+        date_on_card: todayDateKey(),
+        // 海报上展示的是打码号;你在后续文字里提到这两个号时,也必须用这里的 masked 形式
+        masked_plates: masked.map((p) => `${p.region}·${p.masked}·港`),
+      })
     } catch (err: any) {
       console.error('【靓号海报生成/发送失败】', err?.stack ?? err?.message ?? err)
       record({ tool: name, category: 'write', ok: false, error: err.message })
@@ -564,6 +572,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
     - **选号只看号码本身**(数字/字母的谐音、排列、长短),与批文情况无关——note 里的「有批文」「9月3日」只是原样记录,不作为挑选依据,reason 里也不要提批文。
     - reason 用一句话粤语生意口吻,只夸号码本身,如「一路發,尾 8 大吉」。
   · **⚠️ 铁律:必须真的调用 generate_daily_plates 并收到 ok:true,才算出图**。海报图片是工具发到群里的,你自己在文字里说"已生成/出图啦"就是撒谎——用户会等一张永远不来的图。工具调用成功前,只能说"我挑好了,正在出图";失败就道歉并请对方重发。
+  · **⚠️ 打码铁律:海报上的号码是系统自动打码的(遮一个字符防比价),你在工具结果里拿到 masked_plates(如「粤Z·J*15·港」)。你在任何对外文字里提到这两个号,只能用打码形式,绝对不许写出完整号码** —— 同行都在发完整号,客户看到一模一样的号会去比价。推荐理由也围绕打码后仍能看出的部分讲(尾数、排列),被遮掉的那位不要猜、不要提。
   · 工具执行成功会自动把海报图回复到群里并 @发送人;你之后只需用一两句自然的话介绍你的 2 个精选和理由,不要自己再描述日期,不要贴任何链接。工具失败就道歉并让用户重发。
 - 查询知识库:知识库是公司自己维护的资料(产品说明、业务流程、报价规则、常见问答、内部规定等),由同事在管理页录入,**不是群里的聊天记录**。当用户问的是这类"有标准答案、需要查资料"的问题(如"XX流程怎么走""XX多少钱""XX的规定是什么")时调用 search_knowledge_base。
   · **查到结果**:基于结果回答,并说明出自哪篇资料(工具返回里有 source 字段)。不要把检索内容当自己知道的事,要说明是查到的。

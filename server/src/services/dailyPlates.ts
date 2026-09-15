@@ -22,6 +22,30 @@ export interface PlatePick {
   number: string
 }
 
+/**
+ * 号码打码:同行都在发完整号码,用户看到一模一样的号会去比价。
+ * 海报展示时遮掉一个字符,既防比价又留悬念。规则(确定性,不靠模型):
+ *   - 尾数(最后一位)是灵韵所在,原则上保留;
+ *   - 含「4」则必遮 4 —— 忌讳位直接变悬念,一举两得(哪怕 4 在尾数也遮);
+ *   - 否则优先遮字母(字母不带吉凶,数字行情才看得懂),从左往右第一个;
+ *   - 纯数字号遮第一位(尾数照留)。
+ */
+export function maskPlateNumber(number: string): string {
+  const chars = number.split('')
+  const idx4 = chars.findIndex((c) => c === '4')
+  if (idx4 >= 0) {
+    chars[idx4] = '*'
+    return chars.join('')
+  }
+  const letterIdx = chars.findIndex((c, i) => i !== chars.length - 1 && /[A-Za-z]/.test(c))
+  if (letterIdx >= 0) {
+    chars[letterIdx] = '*'
+    return chars.join('')
+  }
+  chars[0] = '*'
+  return chars.join('')
+}
+
 export interface DailyPlateCardOptions {
   /** 口岸中文名(不带"口岸"后缀也会自动补),如「蓮塘」 */
   port: string
@@ -215,14 +239,14 @@ export async function renderDailyPlateCard(opts: DailyPlateCardOptions): Promise
         else en.style.display = 'none'
       }
 
-      // 两个车牌
-      var plates = document.querySelectorAll('.plate')
+      // 两个车牌:号码打码展示(防比价),遮码规则见 maskPlateNumber
+      const plates = document.querySelectorAll('.plate')
       o.picks.forEach(function (pick, i) {
         var el = plates[i]
         if (!el) return
         ;['region', 'digits', 'suffix'].forEach(function (cls) {
           var n = el.querySelector('.' + cls)
-          if (n) n.textContent = cls === 'region' ? pick.region : (cls === 'digits' ? pick.number : '港')
+          if (n) n.textContent = cls === 'region' ? pick.region : (cls === 'digits' ? pick.masked : '港')
         })
       })
       // 第三个及以后的车牌(模板里没有,防御性清掉)
@@ -232,7 +256,7 @@ export async function renderDailyPlateCard(opts: DailyPlateCardOptions): Promise
       port: opts.port,
       portEn: resolvePortEn(opts.port, opts.portEn) || '',
       dateDot: dotDate(opts.dateKey),
-      picks: opts.picks,
+      picks: opts.picks.map((p) => ({ region: p.region, masked: maskPlateNumber(p.number) })),
     })
 
     const canvas = await page.$('.canvas')

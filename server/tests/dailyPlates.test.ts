@@ -36,3 +36,22 @@ test('持久化状态损坏/越界时兜底随机,不崩溃', () => {
   }
   assert.equal(nextTemplateIndex('2026-09-15', { dateKey: '2026-09-15', index: 99 }, N) >= 0, true)
 })
+
+// ---- maskPlateNumber:海报打码(防比价) ----
+import { maskPlateNumber } from '../src/services/dailyPlates.js'
+
+test('打码:含 4 必遮 4(哪怕在尾数)', () => {
+  assert.equal(maskPlateNumber('JU45'), 'JU*5')
+  assert.equal(maskPlateNumber('14'), '1*')
+  assert.equal(maskPlateNumber('4412'), '*412') // 遮第一个 4
+})
+
+test('打码:无 4 时遮字母(字母不带吉凶),保留尾数', () => {
+  assert.equal(maskPlateNumber('JU15'), '*U15')
+  assert.equal(maskPlateNumber('8F35'), '8*35')
+})
+
+test('打码:纯数字号遮第一位,尾数照留', () => {
+  assert.equal(maskPlateNumber('1688'), '*688')
+  assert.equal(maskPlateNumber('96'), '*6')
+})
