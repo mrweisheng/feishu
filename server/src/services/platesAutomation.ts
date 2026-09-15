@@ -90,66 +90,75 @@ export function scheduleDailyPlatesRun(chatId: string): void {
 export async function catchUpOnStartup(): Promise<void> {
   const chatId = config.PLATES_SOURCE_CHAT_ID
   if (!chatId) return
-  const unprocessed = listUnprocessed(chatId)
-  if (unprocessed.length > 0) {
-    console.log(`📅 靓号自动化:发现今天 ${unprocessed.length} 条未处理的现牌文件,启动补救流程`)
+  // 只数未处理的 docx(png 与 docx 内容相同,会在批次里直接标记已处理)
+  const processed = loadProcessed()
+  const unprocessedDocx = listChatFileMessagesSince(chatId, beijingTodayStartMs())
+    .filter((r) => r.message_type === 'file' && !processed.has(r.message_id))
+    .filter((r) => {
+      try {
+        const c = JSON.parse(r.content || '{}')
+        return !!c.file_key && /\.docx?$/i.test(c.file_name || c.name || '')
+      } catch {
+        return false
+      }
+    })
+  if (unprocessedDocx.length > 0) {
+    console.log(`📅 靓号自动化:发现今天 ${unprocessedDocx.length} 条未处理的现牌文件,启动补救流程`)
     await runDailyBatch(chatId)
   } else {
     console.log('📅 靓号自动化:今天暂无未处理的现牌文件')
   }
 }
 
-function listUnprocessed(chatId: string): { messageId: string; fileKey: string; name: string }[] {
-  const processed = loadProcessed()
-  return listChatFileMessagesSince(chatId, beijingTodayStartMs())
-    .filter((r) => r.message_type === 'file' && !processed.has(r.message_id))
-    .map((r) => {
-      try {
-        const c = JSON.parse(r.content || '{}')
-        // 飞书 file 消息的文件名字段是 file_name(旧版兼容 name)
-        return { messageId: r.message_id, fileKey: c.file_key, name: c.file_name || c.name || '' }
-      } catch {
-        return { messageId: r.message_id, fileKey: '', name: '' }
-      }
-    })
-    .filter((f) => {
-      if (!f.fileKey) return false
-      if (!/\.docx?$/i.test(f.name)) {
-        console.warn(`📅 靓号自动化:跳过非 docx 文件「${f.name || '(无名)'}」`)
-        return false
-      }
-      return true
-    })
-}
-
 // ---- 批次执行 ----
 
 async function runDailyBatch(chatId: string): Promise<void> {
-  const files = listUnprocessed(chatId)
+  const processed = loadProcessed()
+  // 未处理的消息:docx 进管线;png 等直接标记已处理(内容与 docx 相同,单独处理没有意义)
+  const rows = listChatFileMessagesSince(chatId, beijingTodayStartMs())
+    .filter((r) => r.message_type === 'file' && !processed.has(r.message_id))
+  const files: { messageId: string; fileKey: string; name: string }[] = []
+  for (const r of rows) {
+    let fileKey = ''
+    let name = ''
+    try {
+      const c = JSON.parse(r.content || '{}')
+      fileKey = c.file_key
+      name = c.file_name || c.name || ''
+    } catch { /* content 解析失败按无名处理 */ }
+    if (!fileKey || !/\.docx?$/i.test(name)) {
+      console.warn(`📅 靓号自动化:跳过非 docx 文件「${name || '(无名)'}」(标记已处理)`)
+      processed.add(r.message_id)
+      continue
+    }
+    files.push({ messageId: r.message_id, fileKey, name })
+  }
   if (files.length === 0) {
-    console.log('📅 靓号自动化:没有未处理的现牌文件,跳过')
+    saveProcessed(processed)
+    console.log('📅 靓号自动化:没有待处理的现牌 docx,跳过')
     return
   }
   console.log(`📅 靓号自动化:开始处理 ${files.length} 个现牌文件`)
 
-  // 按口岸汇总(优先 docx:同批的 png 内容相同,跳过)
+  // 按口岸汇总;记录每个文件归属的口岸,用于成功后精准标记
   const byPort = new Map<string, { plates: CandidatePlate[] }>()
+  const portOfFile = new Map<string, string>()
   for (const f of files) {
-    if (!/\.docx?$/i.test(f.name)) continue // png 等跳过(内容与 docx 相同)
     try {
       const buf = await downloadMessageFile(f.messageId, f.fileKey)
       const docText = buf ? extractDocumentText(f.name, buf, 60_000) : null
       if (!docText) {
-        console.warn(`【靓号自动化】文档无法解析,跳过: ${f.name}`)
+        console.warn(`【靓号自动化】文档无法解析: ${f.name}(保持未处理,下次补救重试)`)
         continue
       }
       const list = await extractPlateList('', [], docText)
       if (!list || !list.plates.length) {
-        console.warn(`【靓号自动化】文档提取不到车牌,跳过: ${f.name}`)
+        console.warn(`【靓号自动化】文档提取不到车牌: ${f.name}(保持未处理,下次补救重试)`)
         continue
       }
       // 口岸优先取文件名(格式固定),提取结果做兜底
       const portKey = portFromFileName(f.name) ?? normalizePort(list.port)
+      portOfFile.set(f.messageId, portKey)
       const agg = byPort.get(portKey) ?? { plates: [] }
       agg.plates.push(...list.plates)
       byPort.set(portKey, agg)
@@ -159,14 +168,16 @@ async function runDailyBatch(chatId: string): Promise<void> {
     }
   }
 
-  // 每个口岸出一张海报,回复到该口岸最后一条文件消息下面
+  // 每个口岸出一张海报,发到输出群(chat_id 直发)
   const orderedPorts = [...CANON_PORTS, ...[...byPort.keys()].filter((p) => !CANON_PORTS.includes(p))]
+  const donePorts = new Set<string>() // 出图成功 or 合法跳过(候选不足)
   let okCount = 0
   for (const port of orderedPorts) {
     const group = byPort.get(port)
     if (!group) continue
     if (group.plates.length < 2) {
       console.warn(`📅 靓号自动化:${port} 候选只有 ${group.plates.length} 个,不足 2 个,跳过`)
+      donePorts.add(port) // 合法跳过也算处理完,避免每次启动反复重试
       continue
     }
     try {
@@ -179,16 +190,20 @@ async function runDailyBatch(chatId: string): Promise<void> {
       const imageKey = await uploadFeishuImage(jpeg)
       const maskedLine = picks.map((p) => `${p.region}·${maskPlateNumber(p.number)}·港`).join(' / ')
       await sendPostWithImage(config.PLATES_OUTPUT_CHAT_ID, imageKey, `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}),海報如下 👇`)
+      donePorts.add(port)
       okCount++
       console.log(`🖼️ 靓号海报已发送: ${port}, 候选 ${group.plates.length} 个, picks=`, picks.map((p) => `${p.number}(→${maskPlateNumber(p.number)})`))
     } catch (err: any) {
-      console.error(`【靓号自动化】${port} 出图失败:`, err?.stack ?? err?.message ?? err)
+      console.error(`【靓号自动化】${port} 出图失败(文件保持未处理,下次补救重试):`, err?.stack ?? err?.message ?? err)
     }
   }
 
-  // 无论成败都标记已处理:失败重跑靠用户手动 @,避免每天自动反复重试
-  const processed = loadProcessed()
-  for (const f of files) processed.add(f.messageId)
+  // 标记策略:只有「成功出图的口岸」和「合法跳过的口岸」对应的文件才标已处理;
+  // 提取失败/出图失败的文件保持未处理,下次启动补救时自动重试。
+  for (const f of files) {
+    const port = portOfFile.get(f.messageId)
+    if (port && donePorts.has(port)) processed.add(f.messageId)
+  }
   saveProcessed(processed)
   console.log(`📅 靓号自动化:批次完成,${orderedPorts.filter((p) => byPort.has(p)).length} 个口岸,成功出图 ${okCount} 张`)
 }
