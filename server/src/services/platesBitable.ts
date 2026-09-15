@@ -31,9 +31,7 @@ interface BitableState {
   appToken?: string
   tableId?: string
   appUrl?: string
-}
-
-const TABLE_NAME = '最新現牌'
+}const TABLE_NAME = '最新現牌'
 const stateFile = path.join(path.dirname(config.DB_PATH), 'daily-plates-bitable.json')
 
 function loadState(): BitableState {
@@ -63,12 +61,27 @@ async function ensureAppToken(): Promise<string> {
     url: '/open-apis/bitable/v1/apps',
     data: { name: '每日靚號現牌' },
   })
-  const token = res?.data?.app?.app_token
-  if (!token) throw new Error(`创建多维表格失败: ${JSON.stringify(res?.data ?? res)?.slice(0, 300)}`)
-  state.appToken = token
+  const app = res?.data?.app
+  if (!app?.app_token) throw new Error(`创建多维表格失败: ${JSON.stringify(res?.data ?? res)?.slice(0, 300)}`)
+  state.appToken = app.app_token as string
+  // 创建响应自带 url(元数据查询接口反而不带,必须在这里存下来)
+  if (app.url) state.appUrl = app.url
   saveState(state)
-  console.log(`📊 靓号多维表格已自动创建, app_token=${token}(分享此表格链接给同事即可查看)`)
-  return token
+  console.log(`📊 靓号多维表格已自动创建, app_token=${app.app_token}(分享此表格链接给同事即可查看)`)
+  return state.appToken as string
+}
+
+/**
+ * 拿多维表格访问链接。按序兜底:
+ *   1. 创建时捕获的 url(创建响应里有,元数据查询接口没有);
+ *   2. 用客资表链接里的租户域名拼标准格式(https://<租户域名>/base/<app_token>);
+ *   3. 都不行返回 null(海报不带链接,但数据已入库)。
+ */
+async function getAppUrl(appToken: string, tableId?: string): Promise<string | null> {
+  const state = loadState()
+  const base = state.appUrl ?? (config.BITABLE_CUSTOMER_LINK ? `${new URL(config.BITABLE_CUSTOMER_LINK).origin}/base/${appToken}` : null)
+  if (!base) return null
+  return tableId ? `${base}?table=${tableId}` : base
 }
 
 async function findTableByName(appToken: string, name: string): Promise<string | null> {
@@ -119,26 +132,6 @@ async function ensureTable(appToken: string): Promise<string> {
   saveState(state)
   console.log(`📊 靓号数据表已创建: ${TABLE_NAME} (table_id=${tableId})`)
   return tableId
-}
-
-/** 拿多维表格的访问链接(自建 app 也会返回 url),失败返回 null */
-async function getAppUrl(appToken: string): Promise<string | null> {
-  const state = loadState()
-  if (state.appUrl) return state.appUrl
-  try {
-    const res: any = await apiClient.request({
-      method: 'GET',
-      url: `/open-apis/bitable/v1/apps/${appToken}`,
-    })
-    const url = res?.data?.app?.url
-    if (url) {
-      state.appUrl = url
-      saveState(state)
-    }
-    return url ?? null
-  } catch {
-    return null
-  }
 }
 
 /** 清空表里全部旧记录(list → batch_delete,每批 500) */
@@ -200,7 +193,7 @@ export async function writeDailyRecordsToBitable(
     }
     const selected = groups.reduce((n, g) => n + g.selectedNumbers.length, 0)
     console.log(`📊 靓号数据已入库多维表格: 清空 ${removed} 行旧记录,写入 ${records.length} 行最新候选(精選 ${selected})`)
-    return await getAppUrl(appToken)
+    return await getAppUrl(appToken, tableId)
   } catch (err: any) {
     console.error('【靓号多维表格入库失败】(不影响海报出图)', err?.response?.data?.msg || (err?.message ?? err))
     if (err?.response?.data?.code === 99991672) {
