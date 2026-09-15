@@ -150,7 +150,9 @@ async function runDailyBatch(chatId: string): Promise<void> {
         console.warn(`【靓号自动化】文档无法解析: ${f.name}(保持未处理,下次补救重试)`)
         continue
       }
-      const list = await extractPlateList('', [], docText)
+      const list = await extractPlateList('', [], docText, {
+        expectedCount: Number(f.name.match(/(\d+)\s*個/)?.[1]) || undefined,
+      })
       if (!list || !list.plates.length) {
         console.warn(`【靓号自动化】文档提取不到车牌: ${f.name}(保持未处理,下次补救重试)`)
         continue
