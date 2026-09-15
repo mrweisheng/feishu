@@ -620,7 +620,10 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
       else if (block.type === 'tool_use') toolUses.push(block)
     }
 
-    if (res.stop_reason === 'tool_use' && toolUses.length) {
+    // ⚠️ 只要 content 里有 tool_use 块就执行工具,不要看 stop_reason ——
+    // MiniMax 的 Anthropic 兼容层返回的 stop_reason 不完全可靠(实测出现过带 tool_use
+    // 却给 end_turn 的情况),按 stop_reason 判断会把工具调用整个丢掉、只发出文字。
+    if (toolUses.length) {
       // 把 assistant 完整回复入历史(含 tool_use block,维持推理链)
       messages.push({ role: 'assistant', content: res.content })
       // 执行工具并回灌 tool_result
@@ -655,6 +658,11 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
     const text = textParts.join('').trim()
     if (!text) {
       console.error('【LLM 警告】返回无 text 内容,stop_reason:', res.stop_reason, '原始 content:', JSON.stringify(res.content))
+    }
+    // 诊断日志:文本收尾时留痕 stop_reason 与块类型分布,便于发现兼容层的异常返回
+    if (text) {
+      const kinds = res.content.map((b) => b.type).join(',') || 'empty'
+      console.log(`🧾 LLM 收尾: stop_reason=${res.stop_reason}, content=[${kinds}], tool_uses=${toolUses.length}`)
     }
     if (text && res.stop_reason !== 'end_turn') {
       console.warn('【LLM 提示】stop_reason=', res.stop_reason, '(非 end_turn,若是 max_tokens 说明输出预算不够,检查 LLM_MAX_TOKENS)')
