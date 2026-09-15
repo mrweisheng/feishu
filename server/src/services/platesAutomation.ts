@@ -5,6 +5,7 @@ import { downloadMessageFile } from '../feishu/media.js'
 import { sendPostWithImage, uploadFeishuImage } from '../feishu/messages.js'
 import { extractDocumentText } from './docxText.js'
 import { extractPlateList } from './platesFlow.js'
+import { writeDailyRecordsToBitable } from './platesBitable.js'
 import { maskPlateNumber, pickBestPlates, renderDailyPlateCard, todayDateKey, type PlatePick } from './dailyPlates.js'
 import fs from 'node:fs'
 
@@ -18,7 +19,7 @@ import fs from 'node:fs'
  * 已处理消息 ID 持久化,重启不会重复出图。
  */
 
-interface CandidatePlate {
+export interface CandidatePlate {
   region: string
   number: string
   note?: string
@@ -43,6 +44,17 @@ function portFromFileName(name: string): string | null {
     if (name.includes(alias)) return PORT_ALIASES[alias]
   }
   return null
+}
+
+/** 从文件名解析类型:如「0915-深圳灣高新現牌-23個.docx」→ 高新現牌 */
+function typeFromFileName(name: string, portKey: string): string {
+  let t = name
+    .replace(/\.[^.]+$/, '') // 去扩展名
+    .replace(/^\d{3,4}-/, '') // 去日期前缀
+    .replace(new RegExp(portKey, 'g'), '') // 去口岸名
+    .replace(/-\d+\s*個.*$/, '') // 去「-23個」尾巴
+  t = t.replace(/^[-_\s]+|-[-_\s]+$/g, '').trim()
+  return t || '現牌'
 }
 
 // ---- 已处理消息 ID 持久化 ----
@@ -142,6 +154,8 @@ async function runDailyBatch(chatId: string): Promise<void> {
   // 按口岸汇总;记录每个文件归属的口岸,用于成功后精准标记
   const byPort = new Map<string, { plates: CandidatePlate[] }>()
   const portOfFile = new Map<string, string>()
+  // 供多维表格入库:每个文件的口岸/类型/候选明细
+  const fileGroups: { port: string; type: string; sourceFile: string; plates: CandidatePlate[] }[] = []
   for (const f of files) {
     try {
       const buf = await downloadMessageFile(f.messageId, f.fileKey)
@@ -163,15 +177,17 @@ async function runDailyBatch(chatId: string): Promise<void> {
       const agg = byPort.get(portKey) ?? { plates: [] }
       agg.plates.push(...list.plates)
       byPort.set(portKey, agg)
+      fileGroups.push({ port: portKey, type: typeFromFileName(f.name, portKey), sourceFile: f.name, plates: list.plates })
       console.log(`📅 靓号自动化:${f.name} → ${portKey} ${list.plates.length} 个候选`)
     } catch (err: any) {
       console.error(`【靓号自动化】处理文件失败 ${f.name}:`, err?.message ?? err)
     }
   }
 
-  // 每个口岸出一张海报,发到输出群(chat_id 直发)
+  // 每个口岸出一张海报,发到输出群(chat_id 直发);精选号留档,供多维表格打勾
   const orderedPorts = [...CANON_PORTS, ...[...byPort.keys()].filter((p) => !CANON_PORTS.includes(p))]
   const donePorts = new Set<string>() // 出图成功 or 合法跳过(候选不足)
+  const selectedByPort = new Map<string, string[]>()
   let okCount = 0
   for (const port of orderedPorts) {
     const group = byPort.get(port)
@@ -183,6 +199,7 @@ async function runDailyBatch(chatId: string): Promise<void> {
     }
     try {
       const picks = pickBestPlates(group.plates) as [PlatePick, PlatePick]
+      selectedByPort.set(port, picks.map((p) => p.number))
       const jpeg = await renderDailyPlateCard({
         port,
         picks,
@@ -206,5 +223,11 @@ async function runDailyBatch(chatId: string): Promise<void> {
     if (port && donePorts.has(port)) processed.add(f.messageId)
   }
   saveProcessed(processed)
+
+  // 当天候选入库飞书多维表格(每天一张表,精选打勾);best-effort,失败不影响海报
+  await writeDailyRecordsToBitable(
+    todayDateKey(),
+    fileGroups.map((g) => ({ ...g, selectedNumbers: selectedByPort.get(g.port) ?? [] })),
+  )
   console.log(`📅 靓号自动化:批次完成,${orderedPorts.filter((p) => byPort.has(p)).length} 个口岸,成功出图 ${okCount} 张`)
 }

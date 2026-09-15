@@ -51,6 +51,8 @@ export const config = {
   PLATES_SOURCE_CHAT_ID: process.env.PLATES_SOURCE_CHAT_ID || 'oc_e42f9b55c0b6b78537f6a6f892fc6c11',
   // 海报输出群 chat_id:生成好的靓号海报发到这个群(默认机器人测试群;chat_id 是群唯一标识,改名不影响)
   PLATES_OUTPUT_CHAT_ID: process.env.PLATES_OUTPUT_CHAT_ID || 'oc_8f99d534ae867d9b28c0a1974e3de5fe',
+  // 候选车牌入库的多维表格 app_token(可选):不配则机器人自动创建「每日靚號現牌」并复用
+  PLATES_BITABLE_APP_TOKEN: process.env.PLATES_BITABLE_APP_TOKEN || '',
   // 检测到文件后等待同批文件发完的防抖窗口(毫秒)
   PLATES_BATCH_DEBOUNCE_MS: Number(process.env.PLATES_BATCH_DEBOUNCE_MS) || 90 * 1000,
 
