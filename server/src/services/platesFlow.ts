@@ -187,21 +187,42 @@ export async function tryRunDailyPlatesFlow(ctx: LlmContext, userText: string): 
   const picks = pickBestPlates(list.plates)
   if (!picks) return false
   try {
+    // 同一个口岸出两张图,唯一差别就是 .digits 是否打码:
+    //   - masked:true  朋友圈营销版(留悬念)
+    //   - masked:false 客户专享完整号版
     const jpeg = await renderDailyPlateCard({
       port: list.port,
       portEn: list.portEn,
       picks: picks as [PlatePick, PlatePick],
       dateKey: todayDateKey(),
+      masked: true,
+    })
+    const jpegFull = await renderDailyPlateCard({
+      port: list.port,
+      portEn: list.portEn,
+      picks: picks as [PlatePick, PlatePick],
+      dateKey: todayDateKey(),
+      masked: false,
     })
     const imageKey = await uploadFeishuImage(jpeg)
-    const maskedLine = picks.map((p) => `${p.region}·${maskPlateNumber(p.number)}·港`).join(' / ')
+    const imageKeyFull = await uploadFeishuImage(jpegFull)
+    const masked1 = maskPlateNumber(picks[0].number)
+    const masked2 = maskPlateNumber(picks[1].number, [masked1])
+    const maskedLine = `${picks[0].region}·${masked1}·港 / ${picks[1].region}·${masked2}·港`
+    const fullLine = `${picks[0].region}·${picks[0].number}·港 / ${picks[1].region}·${picks[1].number}·港`
     await replyPostWithImage(
       ctx.originalMessageId,
       ctx.userOpenId,
       imageKey,
-      `🇭🇰 ${list.port}口岸 今日靚號已精選(${maskedLine}),海報如下 👇`,
+      `🇭🇰 ${list.port}口岸 今日靚號已精選(${maskedLine}) 👇\n📣 第一张为打码版,可发朋友圈;第二张为完整号,可直接转给客户`,
     )
-    console.log(`🖼️ 靓号海报已回复: port=${list.port}, 候选=${list.plates.length}, picks=`, picks.map((p) => `${p.number}(→${maskPlateNumber(p.number)})`))
+    await replyPostWithImage(
+      ctx.originalMessageId,
+      ctx.userOpenId,
+      imageKeyFull,
+      `🔓 ${list.port}口岸 今日靚號完整號碼(${fullLine}) 客户专享`,
+    )
+    console.log(`🖼️ 靓号海报已回复: port=${list.port}, 候选=${list.plates.length}, picks= [${picks[0].number}(→${masked1}), ${picks[1].number}(→${masked2})] (打码+完整双版)`)
     return true
   } catch (err: any) {
     console.error('【靓号海报生成/发送失败】', err?.stack ?? err?.message ?? err)

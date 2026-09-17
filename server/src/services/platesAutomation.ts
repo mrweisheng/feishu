@@ -253,7 +253,9 @@ async function runDailyBatch(chatId: string): Promise<void> {
     const picks = picksByPort.get(port)
     if (!picks) continue
     try {
-      // 打码避让:两张海报位的打码形态不能一样(如 9G88/9H88 都遮中间会都变成 9*88)
+      // 同一个口岸出两张图,文案/排版/挑号全部一致,唯一差别就是 .digits 是否打码:
+      //   - 朋友圈版(masked:true):每个号遮一格,营销留悬念
+      //   - 客户版(masked:false):完整号,发具体客户时直接转给他
       const masked1 = maskPlateNumber(picks[0].number)
       const masked2 = maskPlateNumber(picks[1].number, [masked1])
       const maskedLine = picks.map((p, i) => `${p.region}·${i === 0 ? masked1 : masked2}·港`).join(' / ')
@@ -261,17 +263,32 @@ async function runDailyBatch(chatId: string): Promise<void> {
         port,
         picks,
         dateKey: todayDateKey(),
+        masked: true,
+      })
+      const unmaskedLine = `${picks[0].region}·${picks[0].number}·港 / ${picks[1].region}·${picks[1].number}·港`
+      const jpegFull = await renderDailyPlateCard({
+        port,
+        picks,
+        dateKey: todayDateKey(),
+        masked: false,
       })
       const imageKey = await uploadFeishuImage(jpeg)
+      const imageKeyFull = await uploadFeishuImage(jpegFull)
       await sendPostWithImage(
         config.PLATES_OUTPUT_CHAT_ID,
         imageKey,
-        `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}) 👇`,
+        `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}) 👇\n📣 此图已打码,可发朋友圈;下方第二张为完整号,转发客户用`,
+        bitableUrl ? { text: '📋 完整候選清單(最新現牌)', url: bitableUrl } : undefined,
+      )
+      await sendPostWithImage(
+        config.PLATES_OUTPUT_CHAT_ID,
+        imageKeyFull,
+        `🔓 ${port}口岸 今日靚號完整號碼(${unmaskedLine})\n客户专享,直接转发即可`,
         bitableUrl ? { text: '📋 完整候選清單(最新現牌)', url: bitableUrl } : undefined,
       )
       donePorts.add(port)
       okCount++
-      console.log(`🖼️ 靓号海报已发送: ${port}, 候选 ${byPort.get(port)!.plates.length} 个, picks= [${picks[0].number}(→${masked1}), ${picks[1].number}(→${masked2})]`)
+      console.log(`🖼️ 靓号海报已发送: ${port}, 候选 ${byPort.get(port)!.plates.length} 个, picks= [${picks[0].number}(→${masked1}), ${picks[1].number}(→${masked2})] (朋友圈版+客户完整版)`)
     } catch (err: any) {
       console.error(`【靓号自动化】${port} 出图失败(文件保持未处理,下次补救重试):`, err?.stack ?? err?.message ?? err)
     }

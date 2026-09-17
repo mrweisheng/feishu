@@ -73,6 +73,13 @@ export interface DailyPlateCardOptions {
   picks: [PlatePick, PlatePick]
   /** 卡片日期(北京时间 YYYY-MM-DD),由调用方传入当天日期,不取原素材里的日期 */
   dateKey: string
+  /**
+   * 是否打码展示(默认 true)。
+   * - true(默认):按 maskPlateNumber 规则遮一格,用于发朋友圈/营销(留悬念)
+   * - false:直接展示完整号,用于发给具体客户
+   * 两张图唯一差别就是这个开关,模板/排版/挑号全部复用。
+   */
+  masked?: boolean
 }
 
 // 模板清单(随机选用,4 种风格换着出,避免每天千篇一律)
@@ -307,7 +314,11 @@ export async function renderDailyPlateCard(opts: DailyPlateCardOptions): Promise
       port: opts.port,
       portEn: resolvePortEn(opts.port, opts.portEn) || '',
       dateDot: dotDate(opts.dateKey),
-      picks: opts.picks.map((p) => ({ region: p.region, masked: maskPlateNumber(p.number) })),
+      // opts.masked === false 时(发给具体客户的版本)直接放完整号,跳过 maskPlateNumber
+      picks: opts.picks.map((p) => ({
+        region: p.region,
+        masked: opts.masked === false ? p.number : maskPlateNumber(p.number),
+      })),
     })
 
     const canvas = await page.$('.canvas')
