@@ -23,6 +23,7 @@ import type { LlmContext } from '../llm.js'
 interface CandidatePlate {
   region: string
   number: string
+  port?: string
   note?: string
 }
 
@@ -35,16 +36,17 @@ export interface ExtractedList {
 const EXTRACT_PROMPT = `你是车牌清单提取器。从素材(截图/文字/文档内容)里提取口岸和全部粤Z两地车牌,输出一个 JSON 对象,不要输出任何其他文字:
 
 {
-  "port": "口岸中文名(繁体),如「蓮塘」「深圳灣」「港珠澳大橋」;素材没有明确口岸则填空字符串",
+  "port": "整篇素材的口岸中文名(繁体),如「蓮塘」「深圳灣」「港珠澳大橋」;素材没有明确口岸、或混合了多个口岸(如补充资料),则填空字符串",
   "port_en": "口岸英文名,没有就填空字符串",
   "plates": [
-    { "region": "粤Z", "number": "JS75", "note": "批文/状态备注,没有就省略" }
+    { "region": "粤Z", "number": "JS75", "port": "该车牌所属口岸,没有明确写就填空字符串", "note": "批文/状态备注,没有就省略" }
   ]
 }
 
 要求:
 - 全部车牌原样抄录,一个不漏、不改字;表格可能左右两栏并排,右半边也要提取
 - number 填号牌主体,如表格里「粤Z5P16 港」→ number 填「Z5P16」
+- 口岸写在车牌原文里的(如「粵Z9H88港深圳灣」「5F55港大橋」),把「深圳灣」「大橋」填到该条的 port,不要丢弃
 - 素材里没有车牌或车牌少于 2 个,plates 返回空数组
 - 只提取,不挑选、不评价、不解读号码`
 
@@ -79,7 +81,11 @@ function normalizePlateEntry(p: any): CandidatePlate | null {
   if (!/^[A-Z0-9]{3,4}$/.test(token)) return null
   // 号码主体至少含一位数字(纯字母串像地名缩写,多半是误提取)
   if (!/\d/.test(token)) return null
-  return { region: '粤Z', number: token }
+  // note/逐条口岸原样保留(口岸归口审核依赖它们;以前在这里被丢掉导致补充资料整文件错归口)
+  const out: CandidatePlate = { region: '粤Z', number: token }
+  if (typeof p.port === 'string' && p.port.trim()) out.port = p.port.trim()
+  if (typeof p.note === 'string' && p.note.trim()) out.note = p.note.trim()
+  return out
 }
 
 /**
@@ -125,7 +131,9 @@ export async function extractPlateList(
               .map((p) => [p.number, p]),
           ).values()]
         : []
-      if (!port) {
+      // 整文档口岸为空只在「逐条口岸也全空」时才重试:补充资料等混装文档整文档本就没有单一口岸,
+      // 归口交给下游逐条解析;纯口岸文档连整文档口岸都提不出来说明提取有问题。
+      if (!port && !plates.some((p) => p.port)) {
         console.warn(`【靓号提取】第 ${i + 1} 次无口岸,重试... 原始返回前 300 字: ${text.slice(0, 300)}`)
         continue
       }
@@ -138,7 +146,7 @@ export async function extractPlateList(
         })
         continue
       }
-      console.log(`🔍 靓号提取成功(第 ${i + 1} 次): port=${port}, plates=${plates.length} 个${expectedCount ? `(预期 ${expectedCount})` : ''}`)
+      console.log(`🔍 靓号提取成功(第 ${i + 1} 次): port=${port || '(混装/无)'}, plates=${plates.length} 个${expectedCount ? `(预期 ${expectedCount})` : ''}`)
       return { port, portEn: typeof json?.port_en === 'string' && json.port_en.trim() ? json.port_en.trim() : undefined, plates }
     } catch (err: any) {
       console.warn(`【靓号提取】第 ${i + 1} 次失败: ${err.message}`)

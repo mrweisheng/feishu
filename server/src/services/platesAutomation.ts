@@ -22,6 +22,7 @@ import fs from 'node:fs'
 export interface CandidatePlate {
   region: string
   number: string
+  port?: string
   note?: string
 }
 
@@ -42,6 +43,26 @@ function normalizePort(name: string): string {
 function portFromFileName(name: string): string | null {
   for (const alias of Object.keys(PORT_ALIASES)) {
     if (name.includes(alias)) return PORT_ALIASES[alias]
+  }
+  return null
+}
+
+/** 逐条口岸解析:在原文里定位号码,取其后最近出现的口岸别名(如「9H88港深圳灣」→ 深圳灣)。
+ * 找不到回退到模型给的逐条 port;再返回 null 表示归不了口,由调用方丢弃。 */
+function resolvePlatePort(p: { number: string; port?: string; note?: string }, normText: string): string | null {
+  const at = normText.indexOf(p.number)
+  if (at >= 0) {
+    // 号码往后扫一小段(口岸紧跟在「港」后面,如「9H88港深圳灣」),取偏移最近的别名
+    const window = normText.slice(at + p.number.length, at + p.number.length + 12)
+    let best: { port: string; offset: number } | null = null
+    for (const alias of Object.keys(PORT_ALIASES)) {
+      const idx = window.indexOf(alias)
+      if (idx >= 0 && (!best || idx < best.offset)) best = { port: PORT_ALIASES[alias], offset: idx }
+    }
+    if (best) return best.port
+  }
+  for (const alias of Object.keys(PORT_ALIASES)) {
+    if ((p.port ?? '').includes(alias)) return PORT_ALIASES[alias]
   }
   return null
 }
@@ -144,6 +165,8 @@ async function runDailyBatch(chatId: string): Promise<void> {
     }
     files.push({ messageId: r.message_id, fileKey, name })
   }
+  // 文件名带口岸的清单在前、混装文档(补充资料)在后:去重时同号码优先保留口岸来源更可靠的
+  files.sort((a, b) => (portFromFileName(b.name) ? 1 : 0) - (portFromFileName(a.name) ? 1 : 0))
   if (files.length === 0) {
     saveProcessed(processed)
     console.log('📅 靓号自动化:没有待处理的现牌 docx,跳过')
@@ -151,9 +174,9 @@ async function runDailyBatch(chatId: string): Promise<void> {
   }
   console.log(`📅 靓号自动化:开始处理 ${files.length} 个现牌文件`)
 
-  // 按口岸汇总;记录每个文件归属的口岸,用于成功后精准标记
+  // 按口岸汇总;记录每个文件归属的口岸,用于成功后精准标记(混装文档可能归属多个口岸)
   const byPort = new Map<string, { plates: CandidatePlate[] }>()
-  const portOfFile = new Map<string, string>()
+  const portsOfFile = new Map<string, Set<string>>()
   // 供多维表格入库:每个文件的口岸/类型/候选明细
   const fileGroups: { port: string; type: string; sourceFile: string; plates: CandidatePlate[] }[] = []
   // 跨文件去重:同一口岸同一号码只保留第一次(补充资料常与高新清单重叠)
@@ -173,29 +196,35 @@ async function runDailyBatch(chatId: string): Promise<void> {
         console.warn(`【靓号自动化】文档提取不到车牌: ${f.name}(保持未处理,下次补救重试)`)
         continue
       }
-      // 口岸优先取文件名(格式固定),提取结果做兜底
-      const filePort = portFromFileName(f.name) ?? normalizePort(list.port)
-      portOfFile.set(f.messageId, filePort)
+      // 口岸优先取文件名(格式固定);文件名没有口岸的(补充资料等混装文档)交给逐条解析
+      const filePort = portFromFileName(f.name) ?? (list.port ? normalizePort(list.port) : null)
+      portsOfFile.set(f.messageId, new Set())
 
       // ── 审核①:号码必须能在原文里找到(保证与原始一致),找不到就剔除 ──
       const normText = docText.replace(/\s+/g, '')
-      // ── 审核②:note 里写明的口岸与文件归属不同时,以 note 为准归口(补充资料常混多口岸)──
+      // ── 审核②:逐条归口。文件名带口岸的整文件从属;混装文档逐条解析,
+      //    归不了口的直接剔除(宁可少一条干净数据,不错归口污染候选池)──
       const byPortInFile = new Map<string, CandidatePlate[]>()
       for (const p of list.plates) {
         if (!normText.includes(p.number)) {
           console.warn(`🛡️ 审核:号码 ${p.number} 在原文中找不到,已剔除(${f.name})`)
           continue
         }
-        let port = filePort
-        for (const alias of Object.keys(PORT_ALIASES)) {
-          if ((p.note ?? '').includes(alias) && PORT_ALIASES[alias] !== port) {
-            port = PORT_ALIASES[alias]
-            break
-          }
+        if (filePort) {
+          const arr = byPortInFile.get(filePort) ?? []
+          arr.push(p)
+          byPortInFile.set(filePort, arr)
+          continue
         }
-        const arr = byPortInFile.get(port) ?? []
+        const resolved = resolvePlatePort(p, normText)
+        if (!resolved) {
+          console.warn(`🛡️ 审核:${p.number} 归不了口岸(原文/模型均无口岸信息),已剔除(${f.name})`)
+          continue
+        }
+        console.log(`🛡️ 审核②:${p.number} 逐条归口 → ${resolved}(${f.name})`)
+        const arr = byPortInFile.get(resolved) ?? []
         arr.push(p)
-        byPortInFile.set(port, arr)
+        byPortInFile.set(resolved, arr)
       }
       // ── 审核③:跨文件去重(同口岸同号码只保留第一次)──
       for (const [port, plates] of byPortInFile) {
@@ -209,6 +238,7 @@ async function runDailyBatch(chatId: string): Promise<void> {
           return true
         })
         seenNumbers.set(port, seen)
+        portsOfFile.get(f.messageId)?.add(port)
         if (!fresh.length) continue
         const agg = byPort.get(port) ?? { plates: [] }
         agg.plates.push(...fresh)
@@ -295,10 +325,11 @@ async function runDailyBatch(chatId: string): Promise<void> {
   }
 
   // 标记策略:只有「成功出图的口岸」和「合法跳过的口岸」对应的文件才标已处理;
-  // 提取失败/出图失败的文件保持未处理,下次启动补救时自动重试。
+  // 混装文档归属多个口岸,要它贡献的每个口岸都完成才标;提取失败/出图失败的文件保持未处理,
+  // 下次启动补救时自动重试。
   for (const f of files) {
-    const port = portOfFile.get(f.messageId)
-    if (port && donePorts.has(port)) processed.add(f.messageId)
+    const ports = portsOfFile.get(f.messageId)
+    if (ports && ports.size > 0 && [...ports].every((p) => donePorts.has(p))) processed.add(f.messageId)
   }
   saveProcessed(processed)
   console.log(`📅 靓号自动化:批次完成,${orderedPorts.filter((p) => byPort.has(p)).length} 个口岸,成功出图 ${okCount} 张`)
