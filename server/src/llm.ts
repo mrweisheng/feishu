@@ -8,6 +8,7 @@ import { downloadMessageImage, downloadMessageFile } from './feishu/media.js'
 import { extractDocumentText } from './services/docxText.js'
 import { getWeather, getWeatherForecast } from './services/weather.js'
 import { searchKnowledgeAsText } from './services/knowledge.js'
+import { searchAndDeliverCars, clampLimit } from './services/carinfo.js'
 import {
   type LedgerEntry,
   isWriteTool,
@@ -91,6 +92,26 @@ const GET_WEATHER_FORECAST_TOOL = {
       },
     },
     required: ['city'],
+  },
+}
+
+const SEARCH_CARS_TOOL = {
+  name: 'search_cars',
+  description:
+    '搜索在售车源(香港二手车库,价格港币)。用户表达想找车/搜车/看车价/比较车时调用,如"帮我找台五十万以内的阿尔法""有没有便宜的一手宝马""搵台七座车""来台代步笋盘"。query 传用户的找车要求原句(支持中文/粤语/英文混合,服务端自己解析车型、价格、年份、手数等条件),不要自己拆成结构化字段。工具会把每台候选车的卡片(价格/比价/配置/行情)和实拍图直接发到群里并引用用户提问。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      query: {
+        type: 'string',
+        description: '用户的找车要求,自然语言原句。如"五十万以内的阿尔法,最好一手"。',
+      },
+      limit: {
+        type: 'integer',
+        description: `可选。返回台数,默认 3,上限 ${config.CARINFO_MAX_CARS}。`,
+      },
+    },
+    required: ['query'],
   },
 }
 
@@ -290,6 +311,43 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
       return JSON.stringify({ ok: false, error: `知识库检索失败: ${err.message}` })
     }
   }
+  if (name === 'search_cars') {
+    const { query, limit } = input as { query: string; limit?: number }
+    if (!query || !query.trim()) {
+      record({ tool: name, category: 'read', ok: false, error: '查询词为空' })
+      return JSON.stringify({ ok: false, error: '查询词不能为空' })
+    }
+    try {
+      // category='read':检索+发卡不产生需要核对的写副作用,卡片内容由代码拼装(事实已接管)。
+      // limit 收敛到 [1, CARINFO_MAX_CARS],LLM 传什么都不至于轰炸群。
+      const r = await searchAndDeliverCars(query.trim(), clampLimit(limit, config.CARINFO_MAX_CARS), ctx)
+      record({ tool: name, category: 'read', ok: r.ok })
+      if (!r.ok) {
+        return JSON.stringify({ ok: false, error: r.error })
+      }
+      if (r.sent === 0) {
+        // 库里没有符合条件的车:如实告诉 LLM,让它转述并建议放宽条件,不发任何卡片
+        return JSON.stringify({
+          ok: true,
+          sent: 0,
+          total_matched: r.totalMatched ?? 0,
+          note: '库里没有符合条件的车,卡片没发。请如实告诉用户没找到,并建议放宽条件(如去掉手数/年限/价格上限)再试。',
+        })
+      }
+      return JSON.stringify({
+        ok: true,
+        sent: r.sent,
+        total_matched: r.totalMatched,
+        cars: r.cars,
+        failed_images: r.failedImages ?? 0,
+        note: '车辆卡片和实拍图已由系统直接发到群里(引用了用户的提问消息),用户已经看得到。收尾时简短总结即可,不要再罗列车型/价格明细,更不要自己补充车辆参数。',
+      })
+    } catch (err: any) {
+      console.error('【搜车失败】query=', query, 'msg:', err.message)
+      record({ tool: name, category: 'read', ok: false, error: err.message })
+      return JSON.stringify({ ok: false, error: `车源检索失败:${err.message}` })
+    }
+  }
   // 注:generate_daily_plates(靓号海报)已迁出工具体系,改走确定性管线 services/platesFlow.ts
   // (模型只做提取,选号/打码/出图由代码执行),不再受模型是否调工具的稳定性制约。
   if (name === 'record_customer_info') {
@@ -435,6 +493,10 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · 录完用自然的话告诉用户(如"帮你登记啦,系统会核对条数贴在下面"),**不要自己数数、不要说"已登记 N 条"、不要贴链接** —— 条数和链接由系统核对段自动追加,你说了也会被覆盖/清洗。
   · 看 tool result 的 bitable_synced 字段:任一 false 就告诉用户"飞书表格同步失败,本地 SQLite 里有,需要排查",但具体几条成功以系统核对段为准。
 - 注:「口岸 + 车牌清单」的靓号海报由系统专线自动处理(提取→选号→出图),轮不到你;带图/文档的消息如果系统没有出海报,说明素材不是车牌清单,按普通消息正常聊天即可。
+- 搜车源:用户表达想找车/搜车/看车价/比较车时(如"帮我找台五十万以内的阿尔法""有没有便宜的七座车""搵台笋盘""来台宝马 3 系")调用 search_cars,query 传用户的找车要求原句,limit 默认不传(3 台)。
+  · 工具会把每台候选车的卡片(价格/比价结论/配置/行情依据)和实拍图**直接发到群里**并引用用户的提问,这些信息用户已经看得到。你收尾时只做简短总结(如"帮你挑了 3 台,图都发上面啦👆 看中哪台说一声"),**不要**再罗列车型/价格/参数明细,也不要自己编任何车辆数据。
+  · 工具返回 sent=0 且 ok=true:库里没有符合条件的车,如实告诉用户没找到,并建议放宽条件(比如去掉手数/年限、提高价格上限)。
+  · ok=false:检索服务出故障了,跟用户说声抱歉、建议稍后再试。
 - 查询知识库:知识库是公司自己维护的资料(产品说明、业务流程、报价规则、常见问答、内部规定等),由同事在管理页录入,**不是群里的聊天记录**。当用户问的是这类"有标准答案、需要查资料"的问题(如"XX流程怎么走""XX多少钱""XX的规定是什么")时调用 search_knowledge_base。
   · **查到结果**:基于结果回答,并说明出自哪篇资料(工具返回里有 source 字段)。不要把检索内容当自己知道的事,要说明是查到的。
   · **查不到**:直接说"知识库里还没有这部分内容",**绝对不要凭印象编造**。可以补一句让同事去管理页补录。
@@ -469,6 +531,8 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
         RECORD_CUSTOMER_INFO_TOOL,
         // 知识库关闭时整个工具不下发,LLM 也就不会去调
         ...(config.KB_ENABLED ? [SEARCH_KNOWLEDGE_TOOL] : []),
+        // 搜车工具:没配 CARINFO_API_KEY 就不下发(机器人不知道自己会搜车)
+        ...(config.CARINFO_API_KEY ? [SEARCH_CARS_TOOL] : []),
       ],
       messages,
     })

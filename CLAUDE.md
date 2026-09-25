@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **消息归档**:飞书群消息(实时 + 每 24h 历史补漏)落 SQLite,HTTP API 可分页查看
 2. **@机器人问答(LLM)**:基于 MiniMax(Anthropic SDK 兼容端点)的 tool-use loop,工具覆盖
-   ① 定时提醒 ② 天气查询(实时/多日预报) ③ **客资登记**(发微信联系人截图自动逐条录入,当前最重的能力) ④ 知识库检索
+   ① 定时提醒 ② 天气查询(实时/多日预报) ③ **客资登记**(发微信联系人截图自动逐条录入,当前最重的能力) ④ 知识库检索 ⑤ **车源检索**(carinfo HTTP API,搜车结果卡片+实拍图直发群)
 3. **客资单向同步**:客资数据 best-effort 写飞书多维表格「客资信息登记表」作可视化副本(SQLite 是唯一事实源)
 4. **知识库(RAG)**:独立内容源(与消息归档/客资无关),经 `/admin` 管理页录入 → 中文切片 → bge-m3 向量 + FTS5 trigram 双路召回 → RRF 融合 → LLM 检索问答
 
@@ -117,9 +117,10 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 - `db/` — 持久化层。`index.ts` 单例连接 + schema + 幂等迁移(sqlite-vec 加载失败自动降级,不拖垮服务);`messages/reminders/customerLeads/knowledgeBase` 四个仓储,业务层零 SQL。
 - `ai/model.ts` — LLM 配置(Anthropic SDK 用于手写 tool-use loop,AI SDK 用于 Mastra agent,两者指向同一 MiniMax 端点)。
 - `config.ts` — 集中读 `.env`,缺必填项启动即抛错。`HOST` 默认 127.0.0.1(公网走 nginx 反代无需改);管理页预设账号登录 shengwei / 123456(想换才在 `.env` 覆盖 `KB_ADMIN_*`)。
-- `llm.ts` — @机器人问答入口 + 5 个工具实现 + `finalizeReply`(拼系统核对段)。
+- `llm.ts` — @机器人问答入口 + 6 个工具实现 + `finalizeReply`(拼系统核对段)。
 - `llm/toolRegistry.ts` — **事实接管核心**(写工具登记表 / 系统核对段生成 / URL 清洗 / 去重归一化纯函数,有单测)。
 - `services/weather.ts` — `open-meteo` 封装(中文城市名→拼音兜底→剥行政区后缀,一次请求拿实时+多日)。
+- `services/carinfo.ts` — 车源检索(carinfo HTTP API)客户端 + 卡片纯函数 + 发卡编排(有单测);`npm run carinfo:verify -- "查询词"` 不启动服务验证全链路(检索→详情→下载→飞书上传→发测试卡到机器人测试群)。
 - `services/knowledge.ts` — 知识库服务层:异步串行索引队列(状态机 pending→indexing→ready/failed/stale)+ 混合检索(向量 + BM25 → RRF)。启动自检失败跳过对账,防瞬时故障把全库钉死在 failed。
 - `services/embedding.ts` — OpenAI 兼容嵌入客户端(provider adapter,分批 + 限并发 + 指数退避 + 维度自检);`chunker.ts` 中文特化递归切片;`ftsQuery.ts` / `rank.ts` 纯函数(trigram 滑窗 MATCH 构造 / RRF,有单测)。
 - `feishu/` — 飞书 SDK 封装:`client`(apiClient + wsClient)/ `handler`(消息事件 + worker 启动 + ACK 异步化)/ `history`(24h 历史补漏)/ `messages`(reply)/ `media`(图片下载压缩)/ `reminders`(调度器)/ `bitable-customer`(客资单向同步)。
@@ -127,7 +128,7 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 - `services/auth.ts` — 管理端登录鉴权:凭证校验 + HMAC 会话签名/校验 + 登录限流(纯函数,有单测)。
 - `web/index.html` — 知识库管理页(单文件零构建,挂 `/admin`,含登录界面,按会话切换登录/应用视图)。
 - `mastra/` — Mastra agent 定义。
-- `tests/toolRegistry.test.ts`、`tests/knowledge.test.ts` — `node:test` 单测,覆盖事实接管、去重归一化、切片、FTS 查询构造、RRF。
+- `tests/toolRegistry.test.ts`、`tests/knowledge.test.ts`、`tests/carinfo.test.ts` — `node:test` 单测,覆盖事实接管、去重归一化、切片、FTS 查询构造、RRF、车卡格式化。
 
 ## LLM 工具系统(`llm.ts`)
 
@@ -140,7 +141,7 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 - **图片直接进 LLM 视觉**:联系人截图经 `buildUserContent` 下载压缩后作为 `image` block 喂给 LLM 识别(客资场景的核心输入);文字可空(纯图 @机器人也能触发登记)
 - **失败兜底**:LLM 报错时回复"开小差了,稍后再试";`askLLM` 工具调用用尽 3 轮兜底"处理超时,请重试"
 
-### 工具清单(共 5 个)
+### 工具清单(共 6 个)
 
 | 工具 | 用途 | 入库目标 |
 |---|---|---|
@@ -149,8 +150,11 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 | `get_weather_forecast` | 一次性查未来多天逐日预报(最多3天) | 不入库,直接调 open-meteo |
 | `record_customer_info` | 登记一条客资(销售线索) | `customer_leads` 表 + best-effort 同步飞书表格 |
 | `search_knowledge_base` | 检索公司知识库(`KB_ENABLED=0` 时整个工具不下发) | 不入库,只读 `kb_chunks` |
+| `search_cars` | 搜在售车源(carinfo HTTP API;`CARINFO_API_KEY` 留空时整个工具不下发) | 不入库;卡片+图片由代码直发群 |
 
 `search_knowledge_base` 是**读工具**(category='read'),不参与事实接管——否则每条回答都会被追加莫名其妙的系统核对段。系统 prompt 要求:查到就基于结果回答并说明出处;查不到就直说没有,**绝不编造**。
+
+`search_cars` 同为读工具,但**自带事实接管**:卡片文案(价格/比价/行情/链接)全部由代码从 carinfo API 真实数据拼装(`services/carinfo.ts` 的 `formatCarCardLines`),图片取详情 `images` 前 6 张 → 下载 → 飞书上传换 image_key → post 富文本**引用回复用户提问**(每台车一条)。LLM 收尾只做简短总结,工具返回里明确要求它不再罗列明细。选 HTTP API 而非 MCP:机器人自带 tool-use loop,MCP 客户端会话管理纯属多余(两个入口同一检索内核,实测一致)。
 
 ### 事实接管(`llm/toolRegistry.ts`)-- 核心设计
 
@@ -329,6 +333,9 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 | `BITABLE_CUSTOMER_TABLE_ID` | 否 | 客资多维表格 table_id |
 | `BITABLE_CUSTOMER_LINK` | 否 | 客资表格链接(登记成功后「系统核对」段附上) |
 | `REMINDER_RESEND_WINDOW_MS` | 否 | 提醒重启补偿窗口(毫秒,默认 1800000=30min):重启后过期但 < 该窗口的提醒补发,>= 的丢弃 |
+| `CARINFO_API_KEY` | 否* | 车源检索(carinfo)API Key,43 位;留空 = 不注册 search_cars 工具,机器人不会搜车 |
+| `CARINFO_API_BASE` | 否 | carinfo 服务地址,默认 `https://searchcar.eazycar.top` |
+| `CARINFO_MAX_CARS` | 否 | 单次搜车最多发出的车卡台数,默认 3(每台车图片固定前 6 张) |
 | `KB_ENABLED` | 否 | 知识库总开关,`0` 关闭(不加载 sqlite-vec、不下发检索工具),默认开 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` / `EMBEDDING_DIM` | 否* | 嵌入端点(OpenAI 兼容 `/v1/embeddings`),默认硅基流动 `BAAI/bge-m3` 1024 维;*开知识库且要向量检索则 KEY 必填,缺了降级为纯关键词检索 |
 | `KB_CHUNK_SIZE` / `KB_CHUNK_OVERLAP` | 否 | 切片目标字符数 / 重叠,默认 400 / 60 |
@@ -380,5 +387,12 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 
 - `verifyCredentials`:账号口令全对才通过 / 大小写敏感 / 尾随空格不原谅
 - `verifySession`:签名往返 / 空与乱格式拒绝 / 过期拒绝 / 篡改签名、用户名、过期时间一律拒绝 / 签名合法但用户名与配置不符(改名后旧会话作废)
+
+### carinfo.test.ts(车源检索纯函数)
+
+- `clampLimit`:未传/脏值(null、字符串非数字、小数)默认 3;越界钳到 [1, max](null 会过 `Number()` 变 0,必须显式排除)
+- `pickImageUrls`:详情图 >6 张只取前 6;详情没图兜底搜索条目封面单张;非 http 脏数据剔除
+- `formatCarCardLines`:全字段卡片信息齐全且不漏 undefined/null;全空条目显示「价格待询」不产生空 emoji 行;`age_days=0` 显示「今天刚上」;行情样本 <10 自动降调「仅供参考」;**labels 与自拼行去重**(浏览数/行貨/中港牌/换车帖 labels 已带就不再重复拼,labels 没有才补)
+- `buildCarPostContent`:首段 @提问人+标题;卡片逐行一段;链接 href 必须等于真实 `car_url`;图片每张一段
 
 > 测试文件顶部先注入测试用环境变量再动态 `import()` 被测模块(因 `toolRegistry.ts` 顶部 import `config.ts`,后者在校验 .env 时会抛错)。`knowledge.test.ts` 只测纯函数模块(ftsQuery/rank/chunker),不碰 config 与 SQLite。

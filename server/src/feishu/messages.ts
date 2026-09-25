@@ -55,6 +55,22 @@ export async function replyPostWithImage(
 }
 
 /**
+ * 回复一条富文本(post)消息:多行文字 + 多张图片。
+ * content 由调用方构造(如 services/carinfo.ts 的 buildCarPostContent),
+ * 形状:{ zh_cn: { content: PostRun[][] } },每个内层数组是一段(一行)。
+ */
+export async function replyPostRich(messageId: string, content: unknown): Promise<void> {
+  await apiClient.request({
+    method: 'POST',
+    url: `/open-apis/im/v1/messages/${messageId}/reply`,
+    data: {
+      msg_type: 'post',
+      content: JSON.stringify(content),
+    },
+  })
+}
+
+/**
  * 主动发送一条富文本(post)到指定群(按 chat_id):文字 + 可选链接 + 图片。
  * 用于跨群输出(如靓号海报发到输出群),不能用 reply(只能同一条消息下回复)。
  */

@@ -56,6 +56,13 @@ export const config = {
   // 检测到文件后等待同批文件发完的防抖窗口(毫秒)
   PLATES_BATCH_DEBOUNCE_MS: Number(process.env.PLATES_BATCH_DEBOUNCE_MS) || 90 * 1000,
 
+  // ---- 车源检索(carinfo HTTP API)----
+  // 留空 = 不注册 search_cars 工具(机器人不会搜车,其余功能不受影响)
+  CARINFO_API_KEY: process.env.CARINFO_API_KEY || '',
+  CARINFO_API_BASE: process.env.CARINFO_API_BASE || 'https://searchcar.eazycar.top',
+  // 单次搜车最多发出的车卡台数(防一次几十张图轰炸群);每台车图片固定取前 6 张
+  CARINFO_MAX_CARS: Number(process.env.CARINFO_MAX_CARS) || 3,
+
   // ---- 知识库(RAG) ----
   // 知识库是独立内容源:只能通过管理页录入(文本/粘贴),与飞书消息归档、客资表完全无关。
   // 嵌入走 OpenAI 兼容的 /v1/embeddings(硅基流动 BAAI/bge-m3:1024 维、8192 token、L2 归一化)。
