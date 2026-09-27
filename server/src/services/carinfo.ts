@@ -254,41 +254,61 @@ export function describeCarinfoFailure(err: unknown): { label: string; note: str
 }
 
 async function carinfoFetch<T>(path: string, timeoutMs: number): Promise<T> {
+  const url = `${config.CARINFO_API_BASE}${path}`
+  const startedAt = Date.now()
   let res: Response
   try {
-    res = await fetch(`${config.CARINFO_API_BASE}${path}`, {
+    res = await fetch(url, {
       headers: { 'X-API-Key': config.CARINFO_API_KEY },
       signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (err: any) {
     // AbortSignal.timeout 触发 → TimeoutError(DOMException);DNS/连接被拒 → TypeError
     const isTimeout = err?.name === 'TimeoutError' || err?.name === 'AbortError'
+    console.error(`📥【carinfo·请求失败】GET ${url} (${Date.now() - startedAt}ms): ${err?.message ?? err}`)
     throw new CarinfoError(
       isTimeout ? `搜车服务 ${timeoutMs / 1000}s 无响应` : `连接搜车服务失败:${err?.message ?? err}`,
       isTimeout ? 'timeout' : 'network',
     )
   }
+
+  // ⚠️ 排查用:完整打印原始响应,不截断。
+  // 必须先 text() 再 JSON.parse —— res.json() / res.text() 只能读一次 body,
+  // 读了 json() 就没法再拿原文打印了。
+  const rawText = await res.text().catch(() => '')
+  const costMs = Date.now() - startedAt
+  console.log(
+    `📥【carinfo·原始响应】GET ${url}\n` +
+    `   HTTP ${res.status} ${res.statusText || ''} | 耗时 ${costMs}ms | ${rawText.length} 字符\n` +
+    `   body ↓↓↓\n${rawText}`,
+  )
+
   if (!res.ok) {
-    // 对方 nginx 挂了会回 HTML(如 504 Gateway Time-out),不能直接 res.json()
+    // 对方 nginx 挂了会回 HTML(如 504 Gateway Time-out),不能直接 JSON.parse
     let detail = ''
     try {
-      const body = (await res.json()) as { detail?: string; error?: string; message?: string }
+      const body = JSON.parse(rawText) as { detail?: string; error?: string; message?: string }
       detail = body.detail || body.error || body.message || ''
     } catch {
-      try {
-        const html = await res.text()
-        detail = html.match(/<title>([^<]*)<\/title>/i)?.[1]?.trim() || ''
-      } catch { /* 响应体读不出来,只有状态码 */ }
+      detail = rawText.match(/<title>([^<]*)<\/title>/i)?.[1]?.trim() || ''
     }
     throw new CarinfoError(`搜车服务返回 HTTP ${res.status}${detail ? `(${detail})` : ''}`, 'upstream', res.status)
   }
-  return (await res.json()) as T
+  try {
+    return JSON.parse(rawText) as T
+  } catch (err: any) {
+    throw new CarinfoError(`搜车服务返回内容不是合法 JSON:${err?.message ?? err}`, 'upstream', res.status)
+  }
 }
 
 /** 自然语言检索(服务端自带 LLM 解析,支持中英/粤语混合) */
 export async function searchCars(query: string, limit: number): Promise<CarSearchResult> {
   const q = encodeURIComponent(query)
-  return carinfoFetch<CarSearchResult>(`/search?q=${q}&limit=${limit}`, SEARCH_TIMEOUT_MS)
+  const path = `/search?q=${q}&limit=${limit}`
+  // 入参留痕:真正打到 API 的 query/limit(排查首选看这一条)
+  console.log(`🔍【搜车·入参】query=${JSON.stringify(query)} limit=${limit}`)
+  console.log(`   实际请求: GET ${config.CARINFO_API_BASE}${path}`)
+  return carinfoFetch<CarSearchResult>(path, SEARCH_TIMEOUT_MS)
 }
 
 /** 单车详情(图片全量列表 + 文字描述 + 比价结论都在这) */
@@ -337,7 +357,24 @@ export interface DeliverContext {
 export async function searchAndDeliverCars(query: string, limit: number, ctx: DeliverContext): Promise<CarDeliveryResult> {
   const search = await searchCars(query, limit)
   const items = search.items ?? []
+
+  // 出参(阶段一):API 解析后的检索结果概览 + 逐条候选明细。
+  // 「返回里为什么夹着别的车型」就是看这一段 —— 每条都列 model/vehicle_id/价格,不必翻原始 JSON。
+  console.log(
+    `📤【搜车·检索返回】query=${JSON.stringify(query)} limit=${limit} → items=${items.length}` +
+    ` total_matched=${search.total_matched ?? '—'} parse_source=${search.parse_source ?? '—'}`,
+  )
+  if (search.summary) console.log(`   summary: ${search.summary}`)
+  if (items.length) {
+    const detailLines = items.map((it, i) =>
+      `   #${i + 1} ${it.car_model} | vehicle_id=${it.vehicle_id} | ${it.year ?? '—'}年` +
+      ` | ${it.price_text ?? '价格待询'} | ${it.car_url ?? '无链接'}`,
+    )
+    console.log(detailLines.join('\n'))
+  }
+
   if (items.length === 0) {
+    console.log(`📤【搜车·整轮结果】检索 0 台,未发任何卡片`)
     return { ok: true, sent: 0, totalMatched: search.total_matched ?? 0, cars: [] }
   }
 
@@ -367,10 +404,22 @@ export async function searchAndDeliverCars(query: string, limit: number, ctx: De
       await replyPostRich(ctx.originalMessageId, content)
       sentCars.push({ vehicle_id: item.vehicle_id, model: item.car_model, price: item.price_text ?? '—' })
       console.log(`🚗 已发车卡:${item.car_model} ${item.price_text ?? ''} 图 ${imageKeys.length}/${imageUrls.length} 张`)
+      // 出参(阶段二):真正发到群里的卡片文案 —— 跟上面「检索返回」逐条对照,
+      // 就能确认「群里的 = API 给的」还是中间被改过
+      console.log(
+        `📤【搜车·出参#${sentCars.length}】vehicle_id=${item.vehicle_id} | model=${item.car_model}` +
+        ` | 图片 ${imageKeys.length}/${imageUrls.length} 张 | ${item.car_url ?? '无链接'}`,
+      )
+      console.log(`   卡片文案:\n${lines.map((l) => `   │ ${l}`).join('\n')}`)
     } catch (err: any) {
       console.error(`【搜车】单车发送失败 ${item.vehicle_id}:`, err?.response?.data?.msg || err?.message || err)
     }
   }
+
+  console.log(
+    `📤【搜车·整轮结果】query=${JSON.stringify(query)} 检索 ${items.length} 台 → 成功发卡 ${sentCars.length} 台,` +
+    `失败图片 ${failedImages} 张 | 已发车型:${sentCars.map((c) => c.model).join(' / ') || '无'}`,
+  )
 
   if (sentCars.length === 0) {
     return { ok: false, sent: 0, cars: [], error: '候选车卡片全部发送失败,请稍后再试' }

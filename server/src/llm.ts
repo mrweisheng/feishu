@@ -314,13 +314,20 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
   if (name === 'search_cars') {
     const { query, limit } = input as { query: string; limit?: number }
     if (!query || !query.trim()) {
+      console.warn('🔍【搜车·工具入参】LLM 传了空 query,已拒绝,原始入参:', JSON.stringify(input))
       record({ tool: name, category: 'read', ok: false, error: '查询词为空' })
       return JSON.stringify({ ok: false, error: '查询词不能为空' })
     }
+    // 入参留痕:LLM 原始入参 → 实际执行入参(limit 经收敛,可能与 LLM 给的不同)
+    const effectiveLimit = clampLimit(limit, config.CARINFO_MAX_CARS)
+    console.log(
+      `🔍【搜车·工具入参】LLM 原始入参=${JSON.stringify(input)}` +
+      ` → 实际执行 query=${JSON.stringify(query.trim())} limit=${effectiveLimit}(上限 ${config.CARINFO_MAX_CARS})`,
+    )
     try {
       // category='read':检索+发卡不产生需要核对的写副作用,卡片内容由代码拼装(事实已接管)。
       // limit 收敛到 [1, CARINFO_MAX_CARS],LLM 传什么都不至于轰炸群。
-      const r = await searchAndDeliverCars(query.trim(), clampLimit(limit, config.CARINFO_MAX_CARS), ctx)
+      const r = await searchAndDeliverCars(query.trim(), effectiveLimit, ctx)
       record({ tool: name, category: 'read', ok: r.ok })
       if (!r.ok) {
         return JSON.stringify({ ok: false, error: r.error })
@@ -568,6 +575,10 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
 
       const toolResults: Anthropic.ToolResultBlockParam[] = []
       for (const tu of toolUses) {
+        // 搜车留痕:用户原话(即「用户的入参」)。LLM 本轮解析出的入参由 executeTool 里打印
+        if (tu.name === 'search_cars') {
+          console.log(`🔍【搜车·用户入参】用户原话: ${JSON.stringify(question)}(第 ${i + 1} 轮)`)
+        }
         let result: string
         try {
           result = await executeTool(tu.name, tu.input, ctx, ledger, dedup ?? undefined)
