@@ -8,7 +8,7 @@ import { downloadMessageImage, downloadMessageFile } from './feishu/media.js'
 import { extractDocumentText } from './services/docxText.js'
 import { getWeather, getWeatherForecast } from './services/weather.js'
 import { searchKnowledgeAsText } from './services/knowledge.js'
-import { searchAndDeliverCars, clampLimit } from './services/carinfo.js'
+import { searchAndDeliverCars, clampLimit, describeCarinfoFailure } from './services/carinfo.js'
 import {
   type LedgerEntry,
   isWriteTool,
@@ -343,9 +343,16 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
         note: '车辆卡片和实拍图已由系统直接发到群里(引用了用户的提问消息),用户已经看得到。收尾时简短总结即可,不要再罗列车型/价格明细,更不要自己补充车辆参数。',
       })
     } catch (err: any) {
-      console.error('【搜车失败】query=', query, 'msg:', err.message)
-      record({ tool: name, category: 'read', ok: false, error: err.message })
-      return JSON.stringify({ ok: false, error: `车源检索失败:${err.message}` })
+      // 区分故障归属:超时 / 对方返回错误 / 连不上 —— 否则日志和用户侧都分不清是谁的锅
+      const fail = describeCarinfoFailure(err)
+      console.error(`【搜车失败·${fail.label}】query=`, query, 'msg:', err.message)
+      record({ tool: name, category: 'read', ok: false, error: `${fail.label}:${err.message}` })
+      return JSON.stringify({
+        ok: false,
+        fault: 'upstream',
+        error: `${fail.label}:${err.message}`,
+        note: fail.note,
+      })
     }
   }
   // 注:generate_daily_plates(靓号海报)已迁出工具体系,改走确定性管线 services/platesFlow.ts
@@ -496,7 +503,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
 - 搜车源:用户表达想找车/搜车/看车价/比较车时(如"帮我找台五十万以内的阿尔法""有没有便宜的七座车""搵台笋盘""来台宝马 3 系")调用 search_cars,query 传用户的找车要求原句,limit 默认不传(3 台)。
   · 工具会把每台候选车的卡片(价格/比价结论/配置/行情依据)和实拍图**直接发到群里**并引用用户的提问,这些信息用户已经看得到。你收尾时只做简短总结(如"帮你挑了 3 台,图都发上面啦👆 看中哪台说一声"),**不要**再罗列车型/价格/参数明细,也不要自己编任何车辆数据。
   · 工具返回 sent=0 且 ok=true:库里没有符合条件的车,如实告诉用户没找到,并建议放宽条件(比如去掉手数/年限、提高价格上限)。
-  · ok=false:检索服务出故障了,跟用户说声抱歉、建议稍后再试。
+  · ok=false:搜车服务本身出故障了(**不是你的问题、也不是库里没车**),tool result 里的 note 字段写明了归属,照它说 —— 明确告诉用户是「搜车服务」那边的问题、建议稍后再试,不要把故障含糊成「没找到」。
 - 查询知识库:知识库是公司自己维护的资料(产品说明、业务流程、报价规则、常见问答、内部规定等),由同事在管理页录入,**不是群里的聊天记录**。当用户问的是这类"有标准答案、需要查资料"的问题(如"XX流程怎么走""XX多少钱""XX的规定是什么")时调用 search_knowledge_base。
   · **查到结果**:基于结果回答,并说明出自哪篇资料(工具返回里有 source 字段)。不要把检索内容当自己知道的事,要说明是查到的。
   · **查不到**:直接说"知识库里还没有这部分内容",**绝对不要凭印象编造**。可以补一句让同事去管理页补录。

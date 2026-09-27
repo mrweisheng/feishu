@@ -206,18 +206,81 @@ export function buildCarPostContent(userOpenId: string, lines: string[], carUrl:
 
 // ---- API 客户端 ----
 
+/**
+ * 故障归属分类。存在的唯一目的:别让「对方服务挂了」在日志和用户侧看起来像
+ * 「机器人没干活」或「库里没这台车」。三类泾渭分明:
+ * - timeout  对方服务长时间无响应(我们主动掐断,或对方 nginx 504)
+ * - upstream 对方服务返回了非 2xx
+ * - network  连不上对方(DNS/连接被拒)
+ */
+export type CarinfoErrorKind = 'timeout' | 'upstream' | 'network'
+
+export class CarinfoError extends Error {
+  readonly kind: CarinfoErrorKind
+  readonly status?: number
+  constructor(message: string, kind: CarinfoErrorKind, status?: number) {
+    super(message)
+    this.name = 'CarinfoError'
+    this.kind = kind
+    this.status = status
+  }
+}
+
+/** 把任意异常翻译成「谁的锅」的统一口径,供日志与 LLM 收尾共用 */
+export function describeCarinfoFailure(err: unknown): { label: string; note: string } {
+  const kind = err instanceof CarinfoError ? err.kind : null
+  if (kind === 'timeout') {
+    return {
+      label: '搜车服务无响应(对方服务超时)',
+      note: '这是搜车服务端的问题,不是本机器人故障、也不是库里没有车。请明确告诉用户「搜车服务暂时没响应,是服务那边的问题,稍后再试」,不要含糊成「没找到」。',
+    }
+  }
+  if (kind === 'upstream') {
+    return {
+      label: '搜车服务返回错误(对方服务异常)',
+      note: '这是搜车服务端返回的错误,不是本机器人故障、也不是库里没有车。请如实告诉用户「搜车服务报错了,是服务那边的问题,稍后再试」。',
+    }
+  }
+  if (kind === 'network') {
+    return {
+      label: '连不上搜车服务',
+      note: '本机器人无法连通搜车服务(网络/服务未启动),不是库里没有车。请告诉用户「暂时连不上搜车服务,稍后再试」。',
+    }
+  }
+  return {
+    label: '搜车异常',
+    note: '检索过程中出现异常,不确定是否库里没有车。请如实告诉用户检索失败、建议稍后再试。',
+  }
+}
+
 async function carinfoFetch<T>(path: string, timeoutMs: number): Promise<T> {
-  const res = await fetch(`${config.CARINFO_API_BASE}${path}`, {
-    headers: { 'X-API-Key': config.CARINFO_API_KEY },
-    signal: AbortSignal.timeout(timeoutMs),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${config.CARINFO_API_BASE}${path}`, {
+      headers: { 'X-API-Key': config.CARINFO_API_KEY },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (err: any) {
+    // AbortSignal.timeout 触发 → TimeoutError(DOMException);DNS/连接被拒 → TypeError
+    const isTimeout = err?.name === 'TimeoutError' || err?.name === 'AbortError'
+    throw new CarinfoError(
+      isTimeout ? `搜车服务 ${timeoutMs / 1000}s 无响应` : `连接搜车服务失败:${err?.message ?? err}`,
+      isTimeout ? 'timeout' : 'network',
+    )
+  }
   if (!res.ok) {
+    // 对方 nginx 挂了会回 HTML(如 504 Gateway Time-out),不能直接 res.json()
     let detail = ''
     try {
       const body = (await res.json()) as { detail?: string; error?: string; message?: string }
       detail = body.detail || body.error || body.message || ''
-    } catch { /* 非 JSON 响应,只有状态码 */ }
-    throw new Error(`carinfo ${path} HTTP ${res.status}${detail ? `:${detail}` : ''}`)
+    } catch {
+      try {
+        const html = await res.text()
+        detail = html.match(/<title>([^<]*)<\/title>/i)?.[1]?.trim() || ''
+      } catch { /* 响应体读不出来,只有状态码 */ }
+    }
+    throw new CarinfoError(`搜车服务返回 HTTP ${res.status}${detail ? `(${detail})` : ''}`, 'upstream', res.status)
   }
   return (await res.json()) as T
 }
