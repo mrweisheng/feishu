@@ -53,6 +53,11 @@ export interface CarSearchItem {
   market_basis?: string | null
   labels?: string[]
   price_verdict?: string | null
+  /** 卖家联系方式(服务端 2025-09-25 上线;contact_display 是拼好的展示串) */
+  contact_name?: string | null
+  contact_phone?: string | null
+  contact_email?: string | null
+  contact_display?: string | null
 }
 
 export interface CarDetail {
@@ -176,6 +181,10 @@ export function formatCarCardLines(item: CarSearchItem, detail?: CarDetail | nul
   // 车况描述(详情接口才有)
   const desc = detail?.description?.trim()
   if (desc) lines.push(`📝 ${truncateText(desc, 60)}`)
+
+  // 卖家联系方式(展示串服务端已拼好;无联系方式的车按约定已被检索过滤,此处防御性判空)
+  const contact = item.contact_display?.trim()
+  if (contact) lines.push(`☎ ${contact}`)
 
   return lines
 }

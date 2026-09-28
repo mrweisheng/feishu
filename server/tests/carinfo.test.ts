@@ -79,6 +79,10 @@ const FULL_ITEM = {
   market_basis: '同款 2020-2024 年段中位价 HK$39.9 萬(853 台)',
   market_ref_n: 853,
   car_url: 'https://www.28car.com/sell_dsp.php?h_vid=665579762',
+  contact_name: 'wong',
+  contact_phone: '66118507',
+  contact_email: null,
+  contact_display: 'wong · 66118507',
 }
 
 test('formatCarCardLines:全字段卡片包含关键信息,不出现 undefined/null 字样', () => {
@@ -103,6 +107,7 @@ test('formatCarCardLines:全字段卡片包含关键信息,不出现 undefined/n
   assert.ok(text.includes('中港牌'))
   assert.ok(text.includes('853 台'))
   assert.ok(text.includes('罕有八座位'))
+  assert.ok(text.includes('☎ wong · 66118507'), '卖家联系方式必须在卡片里')
   assert.ok(!text.includes('换车帖'), 'is_swap=false 不应出现换车帖')
   for (const line of lines) {
     assert.ok(!/undefined|null|NaN/.test(line), `卡片行出现脏值:${line}`)
@@ -120,6 +125,13 @@ test('formatCarCardLines:几乎全空的条目也不漏 undefined,且不产生�
   for (const line of lines) {
     assert.ok(!/undefined|null|NaN/.test(line), `空条目出现脏值:${line}`)
     assert.ok(line.replace(/^\S+\s*/, '').trim().length > 0, `疑似空行:${line}`)
+  }
+})
+
+test('formatCarCardLines:contact_display 为 null/空白时不产生 ☎ 行', () => {
+  for (const bad of [null, undefined, '', '   ']) {
+    const lines = formatCarCardLines({ ...FULL_ITEM, contact_display: bad }, null)
+    assert.ok(!lines.some((l) => l.startsWith('☎')), `contact_display=${JSON.stringify(bad)} 不应产生 ☎ 行`)
   }
 })
 
