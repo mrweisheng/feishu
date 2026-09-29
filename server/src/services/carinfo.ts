@@ -38,7 +38,10 @@ export interface CarSearchItem {
   price?: number
   price_text?: string
   car_url?: string
+  /** 封面图地址。服务端 2025-09 起改为自家图片代理端点(可能返回相对路径,需按 CARINFO_API_BASE 拼绝对) */
   image_url?: string | null
+  /** 封面图的 28car 原始直链(仅作留痕/排查,不用于下载) */
+  image_url_raw?: string | null
   seats?: string | null
   engine_volume?: string | null
   mileage_km?: number | null
@@ -62,7 +65,10 @@ export interface CarSearchItem {
 
 export interface CarDetail {
   vehicle_id: string
+  /** 详情图列表,走服务端图片代理端点(可能返回相对路径) */
   images?: string[] | null
+  /** 详情图的 28car 原始直链(仅作留痕/排查,不用于下载) */
+  images_raw?: string[] | null
   description?: string | null
   transmission?: string | null
   fuel_type?: string | null
@@ -103,10 +109,26 @@ export function clampLimit(raw: unknown, max: number, dflt = 3): number {
   return Math.min(Math.max(Math.trunc(n), 1), Math.max(1, max))
 }
 
-/** 详情 images 取前 6 张;详情没图时兜底用搜索条目的封面图(单张);都没有 → 空 */
+/**
+ * 详情 images 取前 6 张;详情没图时兜底用搜索条目的封面图(单张);都没有 → 空。
+ * 接受绝对地址(http/https)与服务端图片代理的相对路径(/vehicle/...),真正的下载在
+ * downloadCarImage 里再拼 base —— 这里只做「是不是个地址」的粗筛。
+ */
 export function pickImageUrls(detailImages: string[] | null | undefined, fallbackCover?: string | null): string[] {
   const list = Array.isArray(detailImages) && detailImages.length ? detailImages : (fallbackCover ? [fallbackCover] : [])
-  return list.filter((u) => typeof u === 'string' && u.startsWith('http')).slice(0, MAX_IMAGES_PER_CAR)
+  return list
+    .filter((u): u is string => typeof u === 'string' && (/^https?:\/\//i.test(u) || u.startsWith('/')))
+    .slice(0, MAX_IMAGES_PER_CAR)
+}
+
+/** 相对地址按 base 拼成绝对地址;已是绝对地址原样返回;非法输入 → null */
+export function resolveImageUrl(raw: string, base: string): string | null {
+  if (/^https?:\/\//i.test(raw)) return raw
+  try {
+    return new URL(raw, base).toString()
+  } catch {
+    return null
+  }
 }
 
 /** 里程公里数 → 香港习惯读法:52000 → 「5.2萬公里」;null → null */
@@ -330,17 +352,31 @@ function isJpegOrPng(buf: Buffer): boolean {
   return buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
 }
 
+function isCarinfoHost(url: string): boolean {
+  try {
+    return new URL(url).host === new URL(config.CARINFO_API_BASE).host
+  } catch {
+    return false
+  }
+}
+
 /**
  * 下载车源图并转成飞书可上传的格式(png/jpeg 直用,webp 等走 sharp 转 jpeg)。
  * 任何一步失败返回 null(调用方跳过该图,不影响整卡发送)。
+ *
+ * 图片地址由服务端图片代理端点给出(可能是相对路径),下载需带 X-API-Key 鉴权;
+ * 但只对合作方域名附带 Key —— 万一响应里混进 28car 原始直链,绝不把 API Key 泄给第三方。
  */
 export async function downloadCarImage(url: string): Promise<Buffer | null> {
+  const resolved = resolveImageUrl(url, config.CARINFO_API_BASE)
+  if (!resolved) return null
+  const headers: Record<string, string> = {
+    // CDN 对无 UA 请求可能 403,带上常规浏览器 UA
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36',
+  }
+  if (isCarinfoHost(resolved)) headers['X-API-Key'] = config.CARINFO_API_KEY
   try {
-    const res = await fetch(url, {
-      // CDN 对无 UA 请求可能 403,带上常规浏览器 UA
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36' },
-      signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS),
-    })
+    const res = await fetch(resolved, { headers, signal: AbortSignal.timeout(IMAGE_TIMEOUT_MS) })
     if (!res.ok) return null
     const raw = Buffer.from(await res.arrayBuffer())
     if (raw.length === 0 || raw.length > FEISHU_IMAGE_MAX_BYTES) return null

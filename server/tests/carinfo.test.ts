@@ -20,6 +20,7 @@ process.env.ANTHROPIC_API_KEY = 'test'
 const {
   clampLimit,
   pickImageUrls,
+  resolveImageUrl,
   formatCarCardLines,
   buildCarPostContent,
   truncateText,
@@ -55,6 +56,25 @@ test('pickImageUrls:详情没图兜底封面单张;都没就空;非 http 脏数�
   assert.deepEqual(pickImageUrls([], null), [])
   assert.deepEqual(pickImageUrls(undefined, undefined), [])
   assert.deepEqual(pickImageUrls(['not-a-url', 'https://ok.example/a.jpg'], null), ['https://ok.example/a.jpg'])
+})
+
+test('pickImageUrls:接受服务端图片代理的相对路径(服务端 2025-09 起改回 /vehicle/...)', () => {
+  // 详情接口现在返回相对路径,不能被 startsWith('http') 一刀切丢掉(否则一张图都不发)
+  assert.deepEqual(
+    pickImageUrls(['/vehicle/s2789749/image/0', '/vehicle/s2789749/image/1'], '/vehicle/s2789749/cover'),
+    ['/vehicle/s2789749/image/0', '/vehicle/s2789749/image/1'],
+  )
+  // 详情为空时兜底用搜索条目的相对封面
+  assert.deepEqual(pickImageUrls(null, '/vehicle/s2789749/cover'), ['/vehicle/s2789749/cover'])
+})
+
+// ---- resolveImageUrl:相对路径拼 base ----
+
+test('resolveImageUrl:相对路径拼 base,绝对地址原样,非法输入 null', () => {
+  assert.equal(resolveImageUrl('/vehicle/x/cover', 'https://searchcar.eazycar.top'), 'https://searchcar.eazycar.top/vehicle/x/cover')
+  assert.equal(resolveImageUrl('https://cdn.example/a.jpg', 'https://searchcar.eazycar.top'), 'https://cdn.example/a.jpg')
+  assert.equal(resolveImageUrl('not-a-url', 'https://searchcar.eazycar.top'), 'https://searchcar.eazycar.top/not-a-url')
+  assert.equal(resolveImageUrl('/x', ''), null)
 })
 
 // ---- formatCarCardLines:卡片文案 ----
