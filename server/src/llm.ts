@@ -569,7 +569,9 @@ ${platesQaEnabled ? `- 查询现牌/靓号:用户在群里问"今天有哪些靓
   // 之后所有 record_customer_info 共用这一份(批量场景一次拉取比对 N 次,不打 N 次接口)。
   let dedup: DedupCtx | null = null
 
+  const tLlmStart = Date.now()
   for (let i = 0; i < 3; i++) {
+    const tRound = Date.now()
     const res = await anthropic.messages.create({
       model: modelName,
       // ⚠️ 不能用小预算:MiniMax M3 是推理模型,输出里混着思考块,工具调用入参也计入输出。
@@ -599,13 +601,16 @@ ${platesQaEnabled ? `- 查询现牌/靓号:用户在群里问"今天有哪些靓
       if (block.type === 'text') textParts.push(block.text)
       else if (block.type === 'tool_use') toolUses.push(block)
     }
+    const roundMs = Date.now() - tRound
 
     // ⚠️ 只要 content 里有 tool_use 块就执行工具,不要看 stop_reason ——
     // MiniMax 的 Anthropic 兼容层返回的 stop_reason 不完全可靠(实测出现过带 tool_use
     // 却给 end_turn 的情况),按 stop_reason 判断会把工具调用整个丢掉、只发出文字。
     if (toolUses.length) {
+      console.log(`⏱️ [LLM] 第 ${i + 1} 轮 ${roundMs}ms,调用工具: ${toolUses.map((t) => t.name).join(', ')}`)
       // 把 assistant 完整回复入历史(含 tool_use block,维持推理链)
       messages.push({ role: 'assistant', content: res.content })
+      const tTools = Date.now()
       // 执行工具并回灌 tool_result
       // 单个工具异常不能让整个 LLM 循环崩:catch 后返 ok:false 给 LLM 自行决定下一步
 
@@ -635,6 +640,7 @@ ${platesQaEnabled ? `- 查询现牌/靓号:用户在群里问"今天有哪些靓
         toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: result })
       }
       messages.push({ role: 'user', content: toolResults })
+      console.log(`⏱️ [LLM] 工具执行 ${Date.now() - tTools}ms(${toolUses.length} 个)`)
       continue
     }
 
@@ -651,10 +657,12 @@ ${platesQaEnabled ? `- 查询现牌/靓号:用户在群里问"今天有哪些靓
     if (text && res.stop_reason !== 'end_turn') {
       console.warn('【LLM 提示】stop_reason=', res.stop_reason, '(非 end_turn,若是 max_tokens 说明输出预算不够,检查 LLM_MAX_TOKENS)')
     }
+    console.log(`⏱️ [LLM] 第 ${i + 1} 轮 ${roundMs}ms(收尾,无工具);总计 ${Date.now() - tLlmStart}ms,共 ${i + 1} 轮`)
 
     return finalizeReply(text, ledger)
   }
 
+  console.log(`⏱️ [LLM] 总计 ${Date.now() - tLlmStart}ms,轮次用尽(3 轮)`)
   return '（抱歉,处理超时,请重试）'
 }
 

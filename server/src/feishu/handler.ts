@@ -279,6 +279,7 @@ async function tryAnswerMention(message: any, openId: string): Promise<void> {
   }
 
   try {
+    const tAsk = Date.now()
     const answer = await askLLM(userText, ctx)
     console.log('🤖 LLM 回答:', answer.slice(0, 200))
     try {
@@ -287,6 +288,7 @@ async function tryAnswerMention(message: any, openId: string): Promise<void> {
     } catch (err: any) {
       console.error('【回复飞书失败】code:', err.response?.data?.code ?? err.status ?? '—', 'msg:', err.response?.data?.msg || err.message)
     }
+    console.log(`⏱️ [耗时] @问答全程 ${Date.now() - tAsk}ms(LLM 生成 + 发回复)`)
   } catch (err: any) {
     // askLLM 失败:回复兜底,避免用户以为没反应
     console.error('【LLM 调用失败】status:', err.status ?? '—', 'msg:', err.message)
@@ -349,14 +351,25 @@ async function handleIncomingMessage(data: FeishuEvent): Promise<void> {
  * 被 fire-and-forget 调用,自身耗时不再阻塞飞书 ACK。
  */
 async function processMessageAsync(message: any, openId: string): Promise<void> {
-  // 异步补名字,拿到后回填
-  const userName = await getUserName(openId)
+  // 姓名回填 与 @机器人问答 互不依赖 → 并行执行,避免通讯录查询串行拖慢回复。
+  // (姓名只用于日志/归档;回复用 <at user_id>,不依赖姓名。冷缓存时省一次网络往返。)
+  const tName = Date.now()
+  const namePromise = getUserName(openId)
+  // 先给 answerPromise 挂一个空 catch:防止在 await 名字期间它 rejection 触发 unhandledRejection;
+  // 真正的异常仍由末尾 await answerPromise 抛出,交给 handleIncomingMessage 的顶层 catch 记录。
+  const answerPromise = tryAnswerMention(message, openId)
+  answerPromise.catch(() => {})
+
+  const userName = await namePromise
+  const nameMs = Date.now() - tName
   if (userName) fillSenderName(message.message_id, userName)
 
   const text = parseMessageText(message)
   logIncomingMessage(userName, message, text)
+  // 姓名查询只在偏慢时提示(冷缓存/接口抖动);命中缓存约 0ms,不必每条都刷屏
+  if (nameMs > 300) console.log(`⏱️ [耗时] 补名字 ${nameMs}ms(与问答并行,偏慢)`)
 
-  await tryAnswerMention(message, openId)
+  await answerPromise
 }
 
 /**
