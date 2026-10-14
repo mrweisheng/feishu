@@ -113,6 +113,22 @@ CREATE INDEX IF NOT EXISTS idx_lead_date    ON customer_leads(lead_date);
 CREATE INDEX IF NOT EXISTS idx_lead_chat    ON customer_leads(chat_id);
 CREATE INDEX IF NOT EXISTS idx_lead_owner   ON customer_leads(owner_open_id);
 CREATE INDEX IF NOT EXISTS idx_lead_deleted ON customer_leads(is_deleted);
+
+-- 现牌车牌(「每日现牌输出群」提取的车牌,本地保留多天历史;问答据此取最近一天)
+CREATE TABLE IF NOT EXISTS plates (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  date_key    TEXT NOT NULL,               -- 批次日期(北京时间 YYYY-MM-DD)
+  port        TEXT NOT NULL,               -- 口岸(规范繁体名)
+  type        TEXT,                        -- 类型(高新現牌/納稅現牌…)
+  region      TEXT,                        -- 号牌前缀(一般 粤Z)
+  number      TEXT NOT NULL,               -- 号牌主体,如 9E66
+  note        TEXT,                        -- 批文/备注
+  source_file TEXT,                        -- 来源文件名(文档或兜底图片)
+  from_image  INTEGER DEFAULT 0,           -- 1=文档读不出来,由图片兜底提取
+  created_at  INTEGER NOT NULL,
+  UNIQUE(date_key, port, number)           -- 同一天同口岸同号只存一条(幂等)
+);
+CREATE INDEX IF NOT EXISTS idx_plates_date ON plates(date_key);
 `)
 
 // ---- 幂等迁移:老库没有 is_bot 列时补上(全新库已在 CREATE TABLE 里建好) ----

@@ -2,11 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { apiClient } from '../feishu/client.js'
 import { config } from '../config.js'
-import type { CandidatePlate } from './platesAutomation.js'
+import type { CandidatePlate } from './platesNaming.js'
 
 /**
- * 每日现牌入库飞书多维表格(bitable):一张固定表「最新現牌」存**最新一批**候选车牌。
- * 每次批次写入前先清空旧记录(全删再插),表里永远只反映最新一次现牌发布。
+ * 每日现牌入库飞书多维表格(bitable):一张固定表「最新現牌」存**最近一天**的候选车牌。
+ * 每次批次写入前先清空旧记录(全删再插),表里永远只反映最近一天的完整清单。
+ * (本地 SQLite 保留多天历史供问答使用,这张表只是给人看的可视化副本。)
  *
  * 表字段:
  *   車牌號碼(text) / 口岸(text) / 類型(text:高新現牌、納稅現牌…)
@@ -19,7 +20,7 @@ import type { CandidatePlate } from './platesAutomation.js'
  * 需要 bitable:app 权限(创建/建表/写记录);报 99991672 按日志里的链接开通。
  */
 
-interface DailyRecordGroup {
+export interface DailyRecordGroup {
   port: string
   type: string
   sourceFile: string
@@ -153,8 +154,8 @@ async function clearTableRecords(appToken: string, tableId: string): Promise<num
 }
 
 /**
- * 把最新一批候选写入多维表格「最新現牌」表(先清空再写入,表里永远只有最新一次的)。
- * 返回多维表格链接(发海报时附上);失败返回 null,best-effort 不影响海报出图。
+ * 把最近一天的候选写入多维表格「最新現牌」表(先清空再写入,表里永远只有最近一天的)。
+ * 返回多维表格链接;失败返回 null,best-effort 不影响本地存储。
  */
 export async function writeDailyRecordsToBitable(
   dateKey: string,
@@ -195,7 +196,7 @@ export async function writeDailyRecordsToBitable(
     console.log(`📊 靓号数据已入库多维表格: 清空 ${removed} 行旧记录,写入 ${records.length} 行最新候选(精選 ${selected})`)
     return await getAppUrl(appToken, tableId)
   } catch (err: any) {
-    console.error('【靓号多维表格入库失败】(不影响海报出图)', err?.response?.data?.msg || (err?.message ?? err))
+    console.error('【靓号多维表格入库失败】(不影响本地存储)', err?.response?.data?.msg || (err?.message ?? err))
     if (err?.response?.data?.code === 99991672) {
       console.error('👉 多维表格权限不足:到飞书开放平台给应用开通 bitable:app 权限后重跑即可')
     }
@@ -324,6 +325,6 @@ export async function auditAndFixBitable(dateKey: string, groups: DailyRecordGro
     if (recheck) console.error(`🛡️ 审核:修复后仍不一致(${recheck}),请人工检查维格表`)
     else console.log(`🛡️ 审核:自动修复完成,重读 ${expected.length} 行全部一致 ✅`)
   } catch (err: any) {
-    console.error('【靓号维格表审核失败】(不影响已发出的海报)', err?.response?.data?.msg || (err?.message ?? err))
+    console.error('【靓号维格表审核失败】(不影响已入库数据)', err?.response?.data?.msg || (err?.message ?? err))
   }
 }

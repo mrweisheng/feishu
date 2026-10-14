@@ -1,31 +1,17 @@
 import type Anthropic from '@anthropic-ai/sdk'
 import { anthropic, modelName } from '../ai/model.js'
 import { config } from '../config.js'
-import { downloadMessageImage, downloadMessageFile } from '../feishu/media.js'
-import { uploadFeishuImage, replyPostWithImage, replyMessage } from '../feishu/messages.js'
-import { extractDocumentText } from './docxText.js'
-import { maskPlateNumber, pickBestPlates, renderDailyPlateCard, todayDateKey, type PlatePick } from './dailyPlates.js'
-import type { LlmContext } from '../llm.js'
+import type { CandidatePlate } from './platesNaming.js'
 
 /**
- * 每日靓号推荐 —— 确定性管线(2026-09-15 重构)。
+ * 车牌清单提取(仅语义提取,确定性执行留给代码)。
  *
- * 旧方案把「视觉提取 + 选号决策 + 大 JSON 工具调用」全压给模型一次完成,
- * 任何一环抖动(不调工具/挑号不合规则/兼容层 stop_reason 异常)整条链就断,稳定性差。
+ * 模型只做一件事:从素材(文档纯文字 / 图片)里读出「口岸 + 全部车牌」,输出 JSON。
+ * 不选号、不评价、不解读 —— 选号/统计/存储全由代码确定性完成,避免模型抖动导致链路断掉。
  *
- * 新分工:**模型只做语义提取(口岸+全部车牌,带校验重试),其余全部代码确定性执行**:
- *   提取(port + 候选车牌) → 选号(pickBestPlates 规则打分) → 打码(maskPlateNumber)
- *   → 渲染(puppeteer 模板) → 上传回复(飞书)。
- * 模型不再需要输出工具调用,也就没有"不调工具/调错参数"这类失败模式;
- * 选号永远符合规则、永远可复现。
+ * 素材优先用文档纯文字(见 docxText.ts);文档读不出来时,调用方改用同一口岸的图片兜底
+ * (extractPlateList 支持 images 入参)。
  */
-
-interface CandidatePlate {
-  region: string
-  number: string
-  port?: string
-  note?: string
-}
 
 export interface ExtractedList {
   port: string
@@ -95,7 +81,7 @@ function normalizePlateEntry(p: any): CandidatePlate | null {
  */
 export async function extractPlateList(
   userText: string,
-  images: { base64: string; mediaType: 'image/jpeg' | 'image/png' }[],
+  images: { base64: string; mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' }[],
   docText: string,
   opts: { attempts?: number; expectedCount?: number } = {},
 ): Promise<ExtractedList | null> {
@@ -153,91 +139,4 @@ export async function extractPlateList(
     }
   }
   return null
-}
-
-/**
- * 靓号管线入口:@消息里带图/文档时先走这条。
- * 返回 true = 已按靓号流程处理(出图或给出引导提示),调用方不再走普通 LLM 问答;
- * 返回 false = 素材不是车牌清单(提取不出口岸+车牌),交给普通 LLM 流程。
- */
-export async function tryRunDailyPlatesFlow(ctx: LlmContext, userText: string): Promise<boolean> {
-  // 1. 收集素材:图片下载压缩、文档提取文字
-  const images: { base64: string; mediaType: 'image/jpeg' | 'image/png' }[] = []
-  for (let i = 0; i < (ctx.voucherImageKeys?.length ?? 0); i++) {
-    const key = ctx.voucherImageKeys![i]
-    const messageId = ctx.imageMessageIds?.[i] || ctx.originalMessageId
-    const img = await downloadMessageImage(messageId, key)
-    if (img) images.push({ base64: img.base64, mediaType: img.mediaType as 'image/jpeg' | 'image/png' })
-  }
-  let docText = ''
-  for (let i = 0; i < (ctx.voucherFileKeys?.length ?? 0); i++) {
-    const f = ctx.voucherFileKeys![i]
-    const messageId = ctx.fileMessageIds?.[i] || ctx.originalMessageId
-    const buf = await downloadMessageFile(messageId, f.key)
-    if (buf) docText += (docText ? '\n' : '') + (extractDocumentText(f.name, buf) ?? '')
-  }
-  if (!images.length && !docText) return false
-
-  // 2. 模型提取(仅提取,带重试)
-  const list = await extractPlateList(userText, images, docText)
-  if (!list || !list.port || list.plates.length === 0) return false // 不是车牌素材 → 普通问答
-
-  // 3. 候选不足 2 个:不生成,引导补齐(产品规则:海报必须有两个号对比)
-  if (list.plates.length < 2) {
-    await replyMessage(
-      ctx.originalMessageId,
-      `<at user_id="${ctx.userOpenId}"></at> 收到,${list.port}口岸的靓号推荐至少要有 2 个候选车牌才能对比着挑,麻烦把清单补全再发一次 🙏`,
-    )
-    return true
-  }
-
-  // 4. 选号(规则打分,确定性)+ 打码 + 渲染 + 上传回复
-  const picks = pickBestPlates(list.plates)
-  if (!picks) return false
-  try {
-    // 同一个口岸出两张图,唯一差别就是 .digits 是否打码:
-    //   - masked:true  朋友圈营销版(留悬念)
-    //   - masked:false 客户专享完整号版
-    const jpeg = await renderDailyPlateCard({
-      port: list.port,
-      portEn: list.portEn,
-      picks: picks as [PlatePick, PlatePick],
-      dateKey: todayDateKey(),
-      masked: true,
-    })
-    const jpegFull = await renderDailyPlateCard({
-      port: list.port,
-      portEn: list.portEn,
-      picks: picks as [PlatePick, PlatePick],
-      dateKey: todayDateKey(),
-      masked: false,
-    })
-    const imageKey = await uploadFeishuImage(jpeg)
-    const imageKeyFull = await uploadFeishuImage(jpegFull)
-    const masked1 = maskPlateNumber(picks[0].number)
-    const masked2 = maskPlateNumber(picks[1].number, [masked1])
-    const maskedLine = `${picks[0].region}·${masked1}·港 / ${picks[1].region}·${masked2}·港`
-    const fullLine = `${picks[0].region}·${picks[0].number}·港 / ${picks[1].region}·${picks[1].number}·港`
-    await replyPostWithImage(
-      ctx.originalMessageId,
-      ctx.userOpenId,
-      imageKey,
-      `🇭🇰 ${list.port}口岸 今日靚號已精選(${maskedLine}) 👇\n📣 第一张为打码版,可发朋友圈;第二张为完整号,可直接转给客户`,
-    )
-    await replyPostWithImage(
-      ctx.originalMessageId,
-      ctx.userOpenId,
-      imageKeyFull,
-      `🔓 ${list.port}口岸 今日靚號完整號碼(${fullLine}) 客户专享`,
-    )
-    console.log(`🖼️ 靓号海报已回复: port=${list.port}, 候选=${list.plates.length}, picks= [${picks[0].number}(→${masked1}), ${picks[1].number}(→${masked2})] (打码+完整双版)`)
-    return true
-  } catch (err: any) {
-    console.error('【靓号海报生成/发送失败】', err?.stack ?? err?.message ?? err)
-    await replyMessage(
-      ctx.originalMessageId,
-      `<at user_id="${ctx.userOpenId}"></at> 靓号挑好了,但出图环节失败了(${err.message}),麻烦稍后再发一次 🙏`,
-    ).catch(() => {})
-    return true
-  }
 }

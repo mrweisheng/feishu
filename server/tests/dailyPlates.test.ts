@@ -1,69 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { nextTemplateIndex } from '../src/services/dailyPlates.js'
+import { pickBestPlates, pickTopPlates, scorePlateNumber, todayDateKey } from '../src/services/dailyPlates.js'
 
-const N = 4
-
-test('当天内复用同一天已选的模板', () => {
-  const idx = nextTemplateIndex('2026-09-15', { dateKey: '2026-09-15', index: 2 }, N)
-  assert.equal(idx, 2)
-})
-
-test('换天按 1234 循环推进,不与上一次相同', () => {
-  assert.equal(nextTemplateIndex('2026-09-16', { dateKey: '2026-09-15', index: 0 }, N), 1)
-  assert.equal(nextTemplateIndex('2026-09-16', { dateKey: '2026-09-15', index: 1 }, N), 2)
-  assert.equal(nextTemplateIndex('2026-09-16', { dateKey: '2026-09-15', index: 2 }, N), 3)
-  assert.equal(nextTemplateIndex('2026-09-16', { dateKey: '2026-09-15', index: 3 }, N), 0)
-})
-
-test('隔多天也只推进一个(与间隔天数无关)', () => {
-  // 1 号用了一次,下次 10 号触发:只看"换天了",推进一个
-  assert.equal(nextTemplateIndex('2026-09-10', { dateKey: '2026-09-01', index: 0 }, N), 1)
-  assert.equal(nextTemplateIndex('2026-09-10', { dateKey: '2026-09-01', index: 3 }, N), 0)
-})
-
-test('历史上第一次使用:随机起点(只断言在合法范围内)', () => {
-  for (let i = 0; i < 20; i++) {
-    const idx = nextTemplateIndex('2026-09-15', null, N)
-    assert.ok(idx >= 0 && idx < N, `随机下标 ${idx} 越界`)
-  }
-})
-
-test('持久化状态损坏/越界时兜底随机,不崩溃', () => {
-  for (let i = 0; i < 20; i++) {
-    const idx = nextTemplateIndex('2026-09-15', { dateKey: '2026-09-14', index: 99 }, N)
-    assert.ok(idx >= 0 && idx < N, `越界状态兜底失败: ${idx}`)
-  }
-  assert.equal(nextTemplateIndex('2026-09-15', { dateKey: '2026-09-15', index: 99 }, N) >= 0, true)
-})
-
-// ---- maskPlateNumber:海报打码(防比价) ----
-import { maskPlateNumber } from '../src/services/dailyPlates.js'
-
-test('打码:遮码位置选"可见部分最靚"的那个', () => {
-  // 遮 4 后变顺子:4678 → *678
-  assert.equal(maskPlateNumber('4678'), '*678')
-  // 遮尾数后像双八:881 → 88*
-  assert.equal(maskPlateNumber('881'), '88*')
-  // 8F35:遮字母 F,8 頭 5 尾可见
-  assert.equal(maskPlateNumber('8F35'), '8*35')
-  // 96:遮 6 保留尾 9(9 比 6 更值)
-  assert.equal(maskPlateNumber('96'), '9*')
-  // 1688:怎么遮都靚,同分取最前 → *688(可见 88 尾叠 + 尾 8)
-  assert.equal(maskPlateNumber('1688'), '*688')
-})
-
-test('打码:含 4 优先遮 4(同分规则)', () => {
-  // 4412:遮任何一个 4 都剩一个 4,但同分时优先遮 4、取最前 → *412
-  assert.equal(maskPlateNumber('4412'), '*412')
-  // 14 → 1*(遮 4 比遮 1 好:可见部分无 4)
-  assert.equal(maskPlateNumber('14'), '1*')
-  // JU45:遮 4 后可见 JU5 无忌讳
-  assert.equal(maskPlateNumber('JU45'), 'JU*5')
-})
-
-// ---- pickBestPlates:确定性选号(代码规则,不靠模型) ----
-import { pickBestPlates, scorePlateNumber } from '../src/services/dailyPlates.js'
+// ---- scorePlateNumber:靓度打分(代码规则,不靠模型) ----
 
 test('选号:豹子/尾8 最靚,含 4 大减分', () => {
   assert.ok(scorePlateNumber('888') > scorePlateNumber('886'))
@@ -72,6 +11,8 @@ test('选号:豹子/尾8 最靚,含 4 大减分', () => {
   assert.ok(scorePlateNumber('8888') < 0 || scorePlateNumber('1234') < 0)
   assert.ok(scorePlateNumber('1234') < scorePlateNumber('1235'))
 })
+
+// ---- pickBestPlates:确定性选号(前二,稳定可复现) ----
 
 test('选号:从 17 个候选里稳定挑出前二', () => {
   const list = [
@@ -87,7 +28,28 @@ test('选号:从 17 个候选里稳定挑出前二', () => {
   ]
   const picks = pickBestPlates(list)!
   assert.equal(picks.length, 2)
-  // Z5E00(尾 00/短)与 Z9F79/Z9J79(双 9 尾 9)应为头部;4 无、3 尾的靠后
   const nums = picks.map((p) => p.number)
   assert.ok(nums.includes('Z5E00'), `应选中 Z5E00,实际 ${nums}`)
+})
+
+test('选号:候选不足 2 个返回 null', () => {
+  assert.equal(pickBestPlates([{ region: '粤Z', number: 'Z5E00' }]), null)
+  assert.equal(pickBestPlates([]), null)
+})
+
+// ---- pickTopPlates:问答「每个口岸挑一些」 ----
+
+test('pickTopPlates:按分排序取前 n,不足则全取,n<=0 返回空', () => {
+  const list = [{ number: '8888' }, { number: '4412' }, { number: '1234' }, { number: '9E66' }]
+  const top2 = pickTopPlates(list, 2)
+  assert.equal(top2.length, 2)
+  assert.ok(!top2.includes('4412'), `含 4 的号不应进前二:${top2}`)
+  assert.deepEqual(pickTopPlates(list, 0), [])
+  assert.equal(pickTopPlates([{ number: '12' }], 5).length, 1)
+})
+
+// ---- todayDateKey:固定北京时间 ----
+
+test('todayDateKey:返回 YYYY-MM-DD(北京时间)', () => {
+  assert.match(todayDateKey(), /^\d{4}-\d{2}-\d{2}$/)
 })

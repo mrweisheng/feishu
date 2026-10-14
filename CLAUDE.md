@@ -219,6 +219,28 @@ Read 用于:CodeGraph 没找到的内容、读 README/.env.example/CLAUDE.md 这
 - **BigInt 主键**:vec0 的 INTEGER PRIMARY KEY 必须绑 BigInt,JS number 会被绑成 REAL 直接报错
 - **鉴权**(services/auth.ts):单预设账号登录,会话 = 无状态 HMAC cookie(`用户名.过期时间.签名`,密钥由 app secret + 账号口令派生 → 改口令即时全端下线、进程重启不掉线,7 天有效);凭证与签名全走 sha256 定长摘要 + timingSafeEqual 防计时攻击;登录连错 5 次按 IP(X-Real-IP,nginx 传入)锁 2 分钟。登录/探测/登出路由注册在 requireLogin 中间件**之前**(Hono 按注册顺序执行,先命中的 handler 直接返回不会落入鉴权);`/admin` 页面本身无数据不做服务端拦截,前端探测 /session 切换登录视图
 
+## 现牌自动化与问答(`services/plates*.ts`)
+
+「每日现牌输出群」发出现牌清单(各口岸的车牌列表)→ 自动提取入库 → 机器人测试群里可直接 @机器人问答。**不再出图**(海报/模板/打码/puppeteer 已下线,`daily_plates_v2/` 模板文件保留但不再使用)。
+
+### 采集入库(`platesAutomation.ts`)
+
+- **触发**:该群出现 `file` 消息 → 防抖 `PLATES_BATCH_DEBOUNCE_MS`(默认 90s,等同批文件发完)→ 一次性处理当天全部未处理文件。启动 60s 后自动重放今天(清标记 + 清当天本地候选)整体重跑,上线即验证
+- **素材策略(文档优先)**:每个口岸先读**文档**(docx/txt/md/csv,`docxText.ts` 抽纯文字);文档下载/解析/提取失败时,再读**同名图片**兜底(`platesNaming.ts` 的 `plateStem` 去掉扩展名+去空白+转小写作配对键);文档与图片都读不出来 → **放弃该口岸**(标记已处理,不卡住后续)
+- **提取**:`platesExtract.ts` 只让模型做「口岸 + 全部车牌」语义提取(带数量校验重试),选号/统计/存储全由代码确定性完成。可用 `npm run plates:replay` 手动重放当天
+- **审核**:① 文档路径下号码必须在原文出现;② 逐条归口(文件名带口岸的整文件从属,混装补充资料逐条解析,归不了口即剔除);③ 跨单元同口岸同号去重
+- **存储**:落本地 SQLite `plates` 表(`db/plates.ts`,保留**多天历史**,`UNIQUE(date_key, port, number)` 幂等);再同步一份到飞书多维表格「最新現牌」作可视化副本(`platesBitable.ts`,写最近一天完整清单 + 读回审核)
+
+### 车牌问答(`platesQuery.ts` / `platesAnswer.ts`)
+
+- **只在 `PLATES_OUTPUT_CHAT_ID`(机器人测试群)**下发 `query_plates` 工具,其余群不下发。`query` 传用户问题原句
+- **取数规则**:总是取「最近有数据的那一天」(今天有就用今天,没有就用昨天,以此类推),日期写进答案,如实告知(不谎称"今天")
+- **三类基础问法**(纯函数 `platesAnswer.ts` 确定性拼答案,号码/数量全来自真实数据,不让模型编):
+  - 有哪些靓号 → 每个口岸按 `scorePlateNumber` 挑前 3 个列出
+  - 有没有包含某数字 → 精确子串检索,有就按口岸列出,没有就直说没有(会先剥掉日期,避免把「8月15号」的数字误当号码)
+  - 某口岸有多少个 → 逐口岸计数(问句里带口岸名会自动收窄到该口岸)
+- LLM 只负责路由(判断该调 `query_plates`)与转述,系统 prompt 明确要求原样转述 answer、不得增删或改动其中号码
+
 ## 提醒调度器(`feishu/reminders.ts`)
 
 混合调度模式,平衡精度与可靠性:

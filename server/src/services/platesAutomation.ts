@@ -1,82 +1,40 @@
 import path from 'node:path'
+import fs from 'node:fs'
 import { config } from '../config.js'
 import { listChatFileMessagesSince } from '../db/messages.js'
+import { addPlates, clearPlatesByDate, listPlatesByDate, type StoredPlate } from '../db/plates.js'
 import { downloadMessageFile } from '../feishu/media.js'
-import { sendPostWithImage, uploadFeishuImage } from '../feishu/messages.js'
 import { extractDocumentText } from './docxText.js'
-import { extractPlateList } from './platesFlow.js'
-import { writeDailyRecordsToBitable, auditAndFixBitable } from './platesBitable.js'
-import { maskPlateNumber, pickBestPlates, renderDailyPlateCard, todayDateKey, type PlatePick } from './dailyPlates.js'
-import fs from 'node:fs'
+import { extractPlateList } from './platesExtract.js'
+import { writeDailyRecordsToBitable, auditAndFixBitable, type DailyRecordGroup } from './platesBitable.js'
+import { pickBestPlates, todayDateKey } from './dailyPlates.js'
+import {
+  normalizePort,
+  portFromFileName,
+  typeFromFileName,
+  resolvePlatePort,
+  plateStem,
+  isDocFile,
+  isImageFile,
+  imageMediaTypeFromName,
+} from './platesNaming.js'
 
 /**
- * 每日靓号自动化:监听「每日现牌输出群」的现牌文件,自动汇总各口岸出海报。
+ * 每日靓号自动化(只存储,不出图)。
  *
- * 触发:该群出现 file 消息(docx 现牌清单)→ 防抖等本批文件发完 → 一次性处理当天全部未处理文件。
- * 补救:服务启动/当天中途上线时,查当天消息里未处理的文件补跑(消息已由历史补漏/实时归档入库)。
- * 汇总:同一口岸多种类型(高新/納稅/高型…)的清单合并为一个候选池,再规则选号出一张海报;
- *       通常 4 个口岸(深圳灣/蓮塘/沙頭角/港珠澳)出 4 张,回复到该群对应文件消息下面。
- * 已处理消息 ID 持久化,重启不会重复出图。
+ * 触发:监听「每日现牌输出群」的现牌文件消息 → 防抖等本批文件发完 → 一次性处理当天未处理的文件。
+ * 补救:服务启动/当天中途上线时,清掉当天标记并整体重跑(上线即验证,当天问题当场暴露)。
+ *
+ * 素材处理策略(简化版):
+ *   - 每个口岸的清单优先读**文档**(docx/txt/md/csv,解析更简单可靠);
+ *   - 文档读不出来(下载失败/解析失败/提取不到车牌)时,再读**同一口岸对应的图片**(按文件名主干配对);
+ *   - 文档与图片都读不出来 → **放弃该口岸**(标记已处理,不再卡住后续)。
+ *
+ * 产出:
+ *   - 候选车牌落本地 SQLite(保留多天历史,供问答取「最近一天」);
+ *   - 同步一份到飞书多维表格「最新現牌」作可视化副本。
+ * 不再生成海报。
  */
-
-export interface CandidatePlate {
-  region: string
-  number: string
-  port?: string
-  note?: string
-}
-
-const CANON_PORTS = ['深圳灣', '蓮塘', '沙頭角', '港珠澳']
-const PORT_ALIASES: Record<string, string> = {
-  '深圳湾': '深圳灣', '深圳灣': '深圳灣',
-  '莲塘': '蓮塘', '蓮塘': '蓮塘',
-  '沙头角': '沙頭角', '沙頭角': '沙頭角',
-  '港珠澳': '港珠澳', '港珠澳大橋': '港珠澳', '港珠澳大桥': '港珠澳',
-}
-
-function normalizePort(name: string): string {
-  const bare = name.replace(/口岸$/, '').trim()
-  return PORT_ALIASES[bare] ?? bare
-}
-
-/** 从文件名解析口岸:如「0915-深圳灣高新現牌-23個.docx」→ 深圳灣 */
-function portFromFileName(name: string): string | null {
-  for (const alias of Object.keys(PORT_ALIASES)) {
-    if (name.includes(alias)) return PORT_ALIASES[alias]
-  }
-  return null
-}
-
-/** 逐条口岸解析:在原文里定位号码,取其后最近出现的口岸别名(如「9H88港深圳灣」→ 深圳灣)。
- * 找不到回退到模型给的逐条 port;再返回 null 表示归不了口,由调用方丢弃。 */
-function resolvePlatePort(p: { number: string; port?: string; note?: string }, normText: string): string | null {
-  const at = normText.indexOf(p.number)
-  if (at >= 0) {
-    // 号码往后扫一小段(口岸紧跟在「港」后面,如「9H88港深圳灣」),取偏移最近的别名
-    const window = normText.slice(at + p.number.length, at + p.number.length + 12)
-    let best: { port: string; offset: number } | null = null
-    for (const alias of Object.keys(PORT_ALIASES)) {
-      const idx = window.indexOf(alias)
-      if (idx >= 0 && (!best || idx < best.offset)) best = { port: PORT_ALIASES[alias], offset: idx }
-    }
-    if (best) return best.port
-  }
-  for (const alias of Object.keys(PORT_ALIASES)) {
-    if ((p.port ?? '').includes(alias)) return PORT_ALIASES[alias]
-  }
-  return null
-}
-
-/** 从文件名解析类型:如「0915-深圳灣高新現牌-23個.docx」→ 高新現牌 */
-function typeFromFileName(name: string, portKey: string): string {
-  let t = name
-    .replace(/\.[^.]+$/, '') // 去扩展名
-    .replace(/^\d{3,4}-/, '') // 去日期前缀
-    .replace(new RegExp(portKey, 'g'), '') // 去口岸名
-    .replace(/-\d+\s*個.*$/, '') // 去「-23個」尾巴
-  t = t.replace(/^[-_\s]+|-[-_\s]+$/g, '').trim()
-  return t || '現牌'
-}
 
 // ---- 已处理消息 ID 持久化 ----
 
@@ -109,7 +67,7 @@ let pendingTimer: NodeJS.Timeout | null = null
 export function scheduleDailyPlatesRun(chatId: string): void {
   if (!config.PLATES_SOURCE_CHAT_ID || chatId !== config.PLATES_SOURCE_CHAT_ID) return
   if (pendingTimer) return // 已有待处理批次,合并成一次跑
-  console.log('📅 靓号自动化:检测到现牌文件,', Math.round(config.PLATES_BATCH_DEBOUNCE_MS / 1000), '秒后汇总生成(等同批文件发完)')
+  console.log('📅 靓号自动化:检测到现牌文件,', Math.round(config.PLATES_BATCH_DEBOUNCE_MS / 1000), '秒后汇总提取(等同批文件发完)')
   pendingTimer = setTimeout(() => {
     pendingTimer = null
     runDailyBatch(chatId).catch((e: any) =>
@@ -120,9 +78,8 @@ export function scheduleDailyPlatesRun(chatId: string): void {
 }
 
 /**
- * 手动重放:清除今天所有现牌文件的"已处理"标记后重新跑一遍批次。
- * 用于验证/排障(npm run plates:replay)——不等下一次消息,当天的问题当场暴露、当场重出。
- * 注意:会在输出群重新发海报(旧海报不会撤回)。
+ * 手动重放:清掉今天所有现牌文件的"已处理"标记,并清空今天的本地候选,再整体重跑。
+ * 用于验证/排障(npm run plates:replay)——不等下一次消息,当天的问题当场暴露、当场纠正。
  */
 export async function replayToday(): Promise<void> {
   const chatId = config.PLATES_SOURCE_CHAT_ID
@@ -133,23 +90,90 @@ export async function replayToday(): Promise<void> {
     if (processed.delete(id)) removed++
   }
   saveProcessed(processed)
-  console.log(`🔁 靓号重放:已清除今天 ${removed} 条文件的已处理标记,重新处理...`)
+  const cleared = clearPlatesByDate(todayDateKey())
+  console.log(`🔁 靓号重放:清除今天 ${removed} 条文件标记、${cleared} 行已存候选,重新处理...`)
   await runDailyBatch(chatId)
 }
 
-/** 启动重放:服务一启动就把今天的现牌消息全部重新处理一遍(清除当天已处理标记)。
- * 用于每次上线即验证当天产出;之后按正常流程标记,处理过的不再重复。 */export async function catchUpOnStartup(): Promise<void> {
+/** 启动重放:服务一启动就把今天的现牌消息全部重新处理一遍(上线即验证)。 */
+export async function catchUpOnStartup(): Promise<void> {
   await replayToday()
+}
+
+// ---- 素材单元(文档 + 对应的兜底图片) ----
+
+interface FileMsg {
+  messageId: string
+  fileKey: string
+  name: string
+}
+
+/** 一个「单元」= 同一个文件名主干下的一组文件(通常一个文档 + 可选一张同内容的图片) */
+interface Unit {
+  stem: string
+  doc?: FileMsg
+  image?: FileMsg
+  messageIds: string[]
+}
+
+function expectedCountFromName(name: string): number | undefined {
+  return Number(name.match(/(\d+)\s*個/)?.[1]) || undefined
+}
+
+interface UnitExtraction {
+  list: Awaited<ReturnType<typeof extractPlateList>>
+  /** 文档路径下用于「号码必须在原文出现」审核的归一文本;图片路径为 ''(无原文可比) */
+  normText: string
+  fromImage: boolean
+  sourceName: string
+}
+
+/**
+ * 提取一个单元:文档优先;失败(下载/解析/提取)再对同一口岸的图片兜底。
+ * @returns 提取结果(plates 非空);两者都读不出来返回 null(调用方放弃该口岸)。
+ */
+async function extractUnit(u: Unit): Promise<UnitExtraction | null> {
+  if (u.doc) {
+    const buf = await downloadMessageFile(u.doc.messageId, u.doc.fileKey)
+    const text = buf ? extractDocumentText(u.doc.name, buf, 60_000) : null
+    if (text && text.trim()) {
+      const list = await extractPlateList('', [], text, { expectedCount: expectedCountFromName(u.doc.name) })
+      if (list && list.plates.length) {
+        return { list, normText: text.replace(/\s+/g, ''), fromImage: false, sourceName: u.doc.name }
+      }
+      console.warn(`📅 靓号:文档提取不到车牌(${u.doc.name}),尝试对应图片兜底`)
+    } else {
+      console.warn(`📅 靓号:文档无法解析(${u.doc.name}),尝试对应图片兜底`)
+    }
+  }
+  if (u.image) {
+    const buf = await downloadMessageFile(u.image.messageId, u.image.fileKey)
+    if (buf) {
+      const base64 = buf.toString('base64')
+      const mediaType = imageMediaTypeFromName(u.image.name)
+      const list = await extractPlateList('', [{ base64, mediaType }], '')
+      if (list && list.plates.length) {
+        console.log(`🖼️ 靓号:由图片兜底提取成功(${u.image.name})`)
+        return { list, normText: '', fromImage: true, sourceName: u.image.name }
+      }
+      console.warn(`📅 靓号:图片也提取不到车牌(${u.image.name})`)
+    } else {
+      console.warn(`📅 靓号:图片下载失败(${u.image.name})`)
+    }
+  }
+  return null
 }
 
 // ---- 批次执行 ----
 
 async function runDailyBatch(chatId: string): Promise<void> {
+  const today = todayDateKey()
   const processed = loadProcessed()
-  // 未处理的消息:docx 进管线;png 等直接标记已处理(内容与 docx 相同,单独处理没有意义)
+
+  // 当天未处理的 file 消息 → 解析文件名,归入「文档 / 图片」单元
   const rows = listChatFileMessagesSince(chatId, beijingTodayStartMs())
     .filter((r) => r.message_type === 'file' && !processed.has(r.message_id))
-  const files: { messageId: string; fileKey: string; name: string }[] = []
+  const units = new Map<string, Unit>()
   for (const r of rows) {
     let fileKey = ''
     let name = ''
@@ -158,179 +182,133 @@ async function runDailyBatch(chatId: string): Promise<void> {
       fileKey = c.file_key
       name = c.file_name || c.name || ''
     } catch { /* content 解析失败按无名处理 */ }
-    if (!fileKey || !/\.docx?$/i.test(name)) {
-      console.warn(`📅 靓号自动化:跳过非 docx 文件「${name || '(无名)'}」(标记已处理)`)
+    if (!fileKey || (!isDocFile(name) && !isImageFile(name))) {
+      console.warn(`📅 靓号:跳过非清单文件「${name || '(无名)'}」(标记已处理)`)
       processed.add(r.message_id)
       continue
     }
-    files.push({ messageId: r.message_id, fileKey, name })
+    const stem = plateStem(name)
+    const u = units.get(stem) ?? { stem, messageIds: [] }
+    u.messageIds.push(r.message_id)
+    const fm: FileMsg = { messageId: r.message_id, fileKey, name }
+    if (isDocFile(name)) {
+      if (!u.doc) u.doc = fm
+    } else if (!u.image) {
+      u.image = fm
+    }
+    units.set(stem, u)
   }
+
   // 文件名带口岸的清单在前、混装文档(补充资料)在后:去重时同号码优先保留口岸来源更可靠的
-  files.sort((a, b) => (portFromFileName(b.name) ? 1 : 0) - (portFromFileName(a.name) ? 1 : 0))
-  if (files.length === 0) {
+  const unitList = [...units.values()].sort((a, b) => {
+    const pa = portFromFileName(a.doc?.name ?? a.image?.name ?? '') ? 0 : 1
+    const pb = portFromFileName(b.doc?.name ?? b.image?.name ?? '') ? 0 : 1
+    return pa - pb
+  })
+  if (unitList.length === 0) {
     saveProcessed(processed)
-    console.log('📅 靓号自动化:没有待处理的现牌 docx,跳过')
+    console.log('📅 靓号自动化:没有待处理的现牌文件,跳过')
     return
   }
-  console.log(`📅 靓号自动化:开始处理 ${files.length} 个现牌文件`)
+  console.log(`📅 靓号自动化:开始处理 ${unitList.length} 个现牌单元`)
 
-  // 按口岸汇总;记录每个文件归属的口岸,用于成功后精准标记(混装文档可能归属多个口岸)
-  const byPort = new Map<string, { plates: CandidatePlate[] }>()
-  const portsOfFile = new Map<string, Set<string>>()
-  // 供多维表格入库:每个文件的口岸/类型/候选明细
-  const fileGroups: { port: string; type: string; sourceFile: string; plates: CandidatePlate[] }[] = []
-  // 跨文件去重:同一口岸同一号码只保留第一次(补充资料常与高新清单重叠)
-  const seenNumbers = new Map<string, Set<string>>() // port → 已见号码
-  for (const f of files) {
+  const toStore: StoredPlate[] = []
+  // 跨单元去重:同一口岸同一号码只保留第一次(补充资料常与高新清单重叠)
+  const seenNumbers = new Map<string, Set<string>>()
+  for (const u of unitList) {
+    const label = u.doc?.name ?? u.image?.name ?? u.stem
     try {
-      const buf = await downloadMessageFile(f.messageId, f.fileKey)
-      const docText = buf ? extractDocumentText(f.name, buf, 60_000) : null
-      if (!docText) {
-        console.warn(`【靓号自动化】文档无法解析: ${f.name}(保持未处理,下次补救重试)`)
+      const extracted = await extractUnit(u)
+      if (!extracted || !extracted.list || !extracted.list.plates.length) {
+        console.warn(`📅 靓号:${label} 文档与图片都读不出来,放弃该口岸`)
+        for (const id of u.messageIds) processed.add(id)
         continue
       }
-      const list = await extractPlateList('', [], docText, {
-        expectedCount: Number(f.name.match(/(\d+)\s*個/)?.[1]) || undefined,
-      })
-      if (!list || !list.plates.length) {
-        console.warn(`【靓号自动化】文档提取不到车牌: ${f.name}(保持未处理,下次补救重试)`)
-        continue
-      }
+      const { list, normText, fromImage, sourceName } = extracted
       // 口岸优先取文件名(格式固定);文件名没有口岸的(补充资料等混装文档)交给逐条解析
-      const filePort = portFromFileName(f.name) ?? (list.port ? normalizePort(list.port) : null)
-      portsOfFile.set(f.messageId, new Set())
-
-      // ── 审核①:号码必须能在原文里找到(保证与原始一致),找不到就剔除 ──
-      const normText = docText.replace(/\s+/g, '')
-      // ── 审核②:逐条归口。文件名带口岸的整文件从属;混装文档逐条解析,
-      //    归不了口的直接剔除(宁可少一条干净数据,不错归口污染候选池)──
-      const byPortInFile = new Map<string, CandidatePlate[]>()
+      const filePort = portFromFileName(sourceName) ?? (list.port ? normalizePort(list.port) : null)
       for (const p of list.plates) {
-        if (!normText.includes(p.number)) {
-          console.warn(`🛡️ 审核:号码 ${p.number} 在原文中找不到,已剔除(${f.name})`)
+        // ── 审核①:文档路径下号码必须能在原文里找到(保证与原始一致);图片路径无原文可比 ──
+        if (normText && !normText.includes(p.number)) {
+          console.warn(`🛡️ 审核:号码 ${p.number} 在原文中找不到,已剔除(${sourceName})`)
           continue
         }
-        if (filePort) {
-          const arr = byPortInFile.get(filePort) ?? []
-          arr.push(p)
-          byPortInFile.set(filePort, arr)
+        // ── 审核②:逐条归口。文件名带口岸的整文件从属;混装文档逐条解析,归不了口即剔除 ──
+        const port = filePort ?? resolvePlatePort(p, normText)
+        if (!port) {
+          console.warn(`🛡️ 审核:${p.number} 归不了口岸(原文/模型均无口岸信息),已剔除(${sourceName})`)
           continue
         }
-        const resolved = resolvePlatePort(p, normText)
-        if (!resolved) {
-          console.warn(`🛡️ 审核:${p.number} 归不了口岸(原文/模型均无口岸信息),已剔除(${f.name})`)
-          continue
-        }
-        console.log(`🛡️ 审核②:${p.number} 逐条归口 → ${resolved}(${f.name})`)
-        const arr = byPortInFile.get(resolved) ?? []
-        arr.push(p)
-        byPortInFile.set(resolved, arr)
-      }
-      // ── 审核③:跨文件去重(同口岸同号码只保留第一次)──
-      for (const [port, plates] of byPortInFile) {
+        // ── 审核③:跨单元去重(同口岸同号码只保留第一次) ──
         const seen = seenNumbers.get(port) ?? new Set<string>()
-        const fresh = plates.filter((p) => {
-          if (seen.has(p.number)) {
-            console.log(`🛡️ 审核:号码 ${p.number} 已存在(${port}),跳过重复(${f.name})`)
-            return false
-          }
-          seen.add(p.number)
-          return true
-        })
+        if (seen.has(p.number)) {
+          console.log(`🛡️ 审核:号码 ${p.number} 已存在(${port}),跳过重复(${sourceName})`)
+          continue
+        }
+        seen.add(p.number)
         seenNumbers.set(port, seen)
-        portsOfFile.get(f.messageId)?.add(port)
-        if (!fresh.length) continue
-        const agg = byPort.get(port) ?? { plates: [] }
-        agg.plates.push(...fresh)
-        byPort.set(port, agg)
-        fileGroups.push({ port, type: typeFromFileName(f.name, port), sourceFile: f.name, plates: fresh })
-        console.log(`📅 靓号自动化:${f.name} → ${port} ${fresh.length} 个候选(审核通过)`)
+        toStore.push({
+          dateKey: today,
+          port,
+          type: typeFromFileName(sourceName, port),
+          region: p.region,
+          number: p.number,
+          note: p.note ?? null,
+          sourceFile: sourceName,
+          fromImage,
+        })
       }
+      for (const id of u.messageIds) processed.add(id)
+      console.log(`📅 靓号:${label} → 累计候选 ${toStore.length} 个(审核通过)`)
     } catch (err: any) {
-      console.error(`【靓号自动化】处理文件失败 ${f.name}:`, err?.message ?? err)
+      // 未预期异常:保持未处理,等下次批次/启动重放补救(不静默丢数据)
+      console.error(`【靓号自动化】处理单元失败 ${label}:`, err?.stack ?? err?.message ?? err)
     }
   }
 
-  // 每个口岸出一张海报,发到输出群(chat_id 直发);精选号留档,供多维表格打勾
-  const orderedPorts = [...CANON_PORTS, ...[...byPort.keys()].filter((p) => !CANON_PORTS.includes(p))]
-  const donePorts = new Set<string>() // 出图成功 or 合法跳过(候选不足)
-  const picksByPort = new Map<string, [PlatePick, PlatePick]>()
-  for (const port of orderedPorts) {
-    const group = byPort.get(port)
-    if (!group) continue
-    if (group.plates.length < 2) {
-      console.warn(`📅 靓号自动化:${port} 候选只有 ${group.plates.length} 个,不足 2 个,跳过`)
-      donePorts.add(port) // 合法跳过也算处理完,避免每次启动反复重试
-      continue
-    }
-    picksByPort.set(port, pickBestPlates(group.plates) as [PlatePick, PlatePick])
+  // 落本地库(多天历史,幂等)
+  const added = addPlates(toStore)
+  console.log(`📅 靓号自动化:本地库新增 ${added} 个候选(当天库存 ${listPlatesByDate(today).length} 个)`)
+
+  // 同步飞书多维表格:写最近一天的完整清单(本地为准),再读回审核
+  const groups = buildGroupsFromStore(today)
+  if (groups.length) {
+    await writeDailyRecordsToBitable(today, groups)
+    await auditAndFixBitable(today, groups)
   }
 
-  // 先入库拿多维表格链接(海报文案附上),再发海报;入库失败不影响海报
-  const bitableUrl = await writeDailyRecordsToBitable(
-    todayDateKey(),
-    fileGroups.map((g) => ({ ...g, selectedNumbers: (picksByPort.get(g.port) ?? []).map((p) => p.number) })),
-  )
-
-  // 入表审核:读回维格表逐行与预期比对(号码/口岸/类型/精选),不一致自动清空重写修复
-  await auditAndFixBitable(
-    todayDateKey(),
-    fileGroups.map((g) => ({ ...g, selectedNumbers: (picksByPort.get(g.port) ?? []).map((p) => p.number) })),
-  )
-
-  let okCount = 0
-  for (const port of orderedPorts) {
-    const picks = picksByPort.get(port)
-    if (!picks) continue
-    try {
-      // 同一个口岸出两张图,文案/排版/挑号全部一致,唯一差别就是 .digits 是否打码:
-      //   - 朋友圈版(masked:true):每个号遮一格,营销留悬念
-      //   - 客户版(masked:false):完整号,发具体客户时直接转给他
-      const masked1 = maskPlateNumber(picks[0].number)
-      const masked2 = maskPlateNumber(picks[1].number, [masked1])
-      const maskedLine = picks.map((p, i) => `${p.region}·${i === 0 ? masked1 : masked2}·港`).join(' / ')
-      const jpeg = await renderDailyPlateCard({
-        port,
-        picks,
-        dateKey: todayDateKey(),
-        masked: true,
-      })
-      const unmaskedLine = `${picks[0].region}·${picks[0].number}·港 / ${picks[1].region}·${picks[1].number}·港`
-      const jpegFull = await renderDailyPlateCard({
-        port,
-        picks,
-        dateKey: todayDateKey(),
-        masked: false,
-      })
-      const imageKey = await uploadFeishuImage(jpeg)
-      const imageKeyFull = await uploadFeishuImage(jpegFull)
-      await sendPostWithImage(
-        config.PLATES_OUTPUT_CHAT_ID,
-        imageKey,
-        `🇭🇰 ${port}口岸 今日靚號已精選(${maskedLine}) 👇\n📣 此图已打码,可发朋友圈;下方第二张为完整号,转发客户用`,
-        bitableUrl ? { text: '📋 完整候選清單(最新現牌)', url: bitableUrl } : undefined,
-      )
-      await sendPostWithImage(
-        config.PLATES_OUTPUT_CHAT_ID,
-        imageKeyFull,
-        `🔓 ${port}口岸 今日靚號完整號碼(${unmaskedLine})\n客户专享,直接转发即可`,
-        bitableUrl ? { text: '📋 完整候選清單(最新現牌)', url: bitableUrl } : undefined,
-      )
-      donePorts.add(port)
-      okCount++
-      console.log(`🖼️ 靓号海报已发送: ${port}, 候选 ${byPort.get(port)!.plates.length} 个, picks= [${picks[0].number}(→${masked1}), ${picks[1].number}(→${masked2})] (朋友圈版+客户完整版)`)
-    } catch (err: any) {
-      console.error(`【靓号自动化】${port} 出图失败(文件保持未处理,下次补救重试):`, err?.stack ?? err?.message ?? err)
-    }
-  }
-
-  // 标记策略:只有「成功出图的口岸」和「合法跳过的口岸」对应的文件才标已处理;
-  // 混装文档归属多个口岸,要它贡献的每个口岸都完成才标;提取失败/出图失败的文件保持未处理,
-  // 下次启动补救时自动重试。
-  for (const f of files) {
-    const ports = portsOfFile.get(f.messageId)
-    if (ports && ports.size > 0 && [...ports].every((p) => donePorts.has(p))) processed.add(f.messageId)
-  }
   saveProcessed(processed)
-  console.log(`📅 靓号自动化:批次完成,${orderedPorts.filter((p) => byPort.has(p)).length} 个口岸,成功出图 ${okCount} 张`)
+  console.log(`📅 靓号自动化:批次完成,新增 ${added} 个候选,覆盖 ${groups.length} 个口岸/类型分组`)
+}
+
+/** 从本地库读出某天全部候选,按 口岸+类型+来源文件 分组(供多维表格写入),并标注各口岸精选号 */
+function buildGroupsFromStore(dateKey: string): DailyRecordGroup[] {
+  const rows = listPlatesByDate(dateKey)
+  if (!rows.length) return []
+
+  // 每个口岸的「今日精選」= 该口岸全部号码里分最高的两个
+  const ports = [...new Set(rows.map((r) => r.port))]
+  const picksByPort = new Map<string, string[]>()
+  for (const port of ports) {
+    const picks = pickBestPlates(rows.filter((r) => r.port === port).map((r) => ({ region: r.region ?? '粤Z', number: r.number })))
+    picksByPort.set(port, picks ? picks.map((p) => p.number) : [])
+  }
+
+  const byKey = new Map<string, DailyRecordGroup>()
+  for (const r of rows) {
+    const key = `${r.port}|${r.type ?? ''}|${r.sourceFile ?? ''}`
+    let g = byKey.get(key)
+    if (!g) {
+      g = {
+        port: r.port,
+        type: r.type ?? '現牌',
+        sourceFile: r.sourceFile ?? '',
+        plates: [],
+        selectedNumbers: picksByPort.get(r.port) ?? [],
+      }
+      byKey.set(key, g)
+    }
+    g.plates.push({ region: r.region ?? '粤Z', number: r.number, note: r.note ?? undefined })
+  }
+  return [...byKey.values()]
 }

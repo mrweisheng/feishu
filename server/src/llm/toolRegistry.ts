@@ -56,7 +56,8 @@ const LINK_SOURCES: Record<string, string | null> = {
 const WRITE_TOOLS = new Map<string, WriteToolSpec>([
   ['record_customer_info', { name: 'record_customer_info', linkKey: 'customer' }],
   ['set_reminder', { name: 'set_reminder' }], // 写工具(改 DB + 调度),同源 bug 一起根治,但不贴链接
-  // 注:靓号海报(原 generate_daily_plates)已迁出工具体系,走确定性管线 services/platesFlow.ts
+  // 注:靓号海报(原 generate_daily_plates)已下线——现牌只做提取+存储,问答走只读的 query_plates
+  // (确定性读本地库),不参与事实接管。
   // 未来:record_order / record_after_sale / record_appointment ...
 ])
 

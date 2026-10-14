@@ -9,6 +9,7 @@ import { extractDocumentText } from './services/docxText.js'
 import { getWeather, getWeatherForecast } from './services/weather.js'
 import { searchKnowledgeAsText } from './services/knowledge.js'
 import { searchAndDeliverCars, clampLimit, describeCarinfoFailure } from './services/carinfo.js'
+import { answerPlatesQuestion } from './services/platesQuery.js'
 import {
   type LedgerEntry,
   isWriteTool,
@@ -163,6 +164,22 @@ const SEARCH_KNOWLEDGE_TOOL = {
       query: {
         type: 'string',
         description: '检索关键词或问题。用用户真正在问的核心词,不要照搬整句口语,也不要太长。',
+      },
+    },
+    required: ['query'],
+  },
+}
+
+const QUERY_PLATES_TOOL = {
+  name: 'query_plates',
+  description:
+    '查询最近一批中港两地牌(现牌/靓号)数据。用户在群里问"今天有哪些靓号""有没有包含 X 的号码""哪个口岸今天有多少个牌"这类关于现牌/靓号/车牌的问题时调用。query 传用户问题的原句。工具会基于「最近有数据的那一天」(今天有就用今天,没有就用昨天/更早)返回整理好的真实答案,你直接转述即可。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      query: {
+        type: 'string',
+        description: '用户关于现牌/靓号的问题原句,如"今天有哪些靓号""有没有包含8的号""深圳湾今天多少个牌"。',
       },
     },
     required: ['query'],
@@ -362,8 +379,25 @@ async function executeTool(name: string, input: any, ctx: LlmContext, ledger: Le
       })
     }
   }
-  // 注:generate_daily_plates(靓号海报)已迁出工具体系,改走确定性管线 services/platesFlow.ts
-  // (模型只做提取,选号/打码/出图由代码执行),不再受模型是否调工具的稳定性制约。
+  if (name === 'query_plates') {
+    const { query } = input as { query: string }
+    if (!query || !query.trim()) {
+      record({ tool: name, category: 'read', ok: false, error: '问题为空' })
+      return JSON.stringify({ ok: false, error: '问题不能为空' })
+    }
+    try {
+      // category='read':只读本地库、无副作用,不参与事实接管
+      const r = answerPlatesQuestion(query.trim())
+      record({ tool: name, category: 'read', ok: r.ok })
+      return JSON.stringify(r)
+    } catch (err: any) {
+      console.error('【车牌问答失败】query=', query, 'msg:', err.message)
+      record({ tool: name, category: 'read', ok: false, error: err.message })
+      return JSON.stringify({ ok: false, error: `查询现牌数据失败: ${err.message}` })
+    }
+  }
+  // 注:靓号海报(原 generate_daily_plates / platesFlow)已下线——现牌只做提取+存储,
+  // 问答走 query_plates(确定性读本地库);不再生成海报。
   if (name === 'record_customer_info') {
     const {
       customer_name,
@@ -478,6 +512,8 @@ export function setOnReminderAdded(fn: () => void): void {
  * ctx 提供群/用户/原消息上下文,工具执行时用。
  */
 export async function askLLM(question: string, ctx: LlmContext): Promise<string> {
+  // 车牌问答只在机器人测试群里开放(与现牌自动化同群),其余群不下发该工具
+  const platesQaEnabled = !!(config.PLATES_OUTPUT_CHAT_ID && ctx.chatId === config.PLATES_OUTPUT_CHAT_ID)
   const system = `你是一个有帮助又活泼的群助手。当前时间:${currentTimeStr()}(UTC+8, Asia/Shanghai)。用户在飞书群里@你交流。
 回答风格:像群里熟悉的朋友,语气轻松、自然、偶尔用 emoji 调节气氛,避免机械感和官腔。简短直接,不说废话。
 你能力:
@@ -506,7 +542,7 @@ export async function askLLM(question: string, ctx: LlmContext): Promise<string>
   · 每条都调一次 record_customer_info(可以并行 8-10 个 tool_use block);lead_date 传当天 00:00:00 +08:00 的 ISO 字符串(YYYY-MM-DDTHH:mm:ss+08:00,工具内部会转);customer_name 传整段客户名称(上一条规则);is_key_customer 和 visited_store 都不传(默认 false);customer_wechat 图里有就填,没就空;customer_notes **只有用户明确说"备注:xxx""笔记:xxx""补充:xxx"时才填,别瞎编**(图片识别时一律不传)。
   · 录完用自然的话告诉用户(如"帮你登记啦,系统会核对条数贴在下面"),**不要自己数数、不要说"已登记 N 条"、不要贴链接** —— 条数和链接由系统核对段自动追加,你说了也会被覆盖/清洗。
   · 看 tool result 的 bitable_synced 字段:任一 false 就告诉用户"飞书表格同步失败,本地 SQLite 里有,需要排查",但具体几条成功以系统核对段为准。
-- 注:「口岸 + 车牌清单」的靓号海报由系统专线自动处理(提取→选号→出图),轮不到你;带图/文档的消息如果系统没有出海报,说明素材不是车牌清单,按普通消息正常聊天即可。
+- 注:群里的「口岸 + 车牌清单」由系统自动提取、入库(不再出图),轮不到你处理;需要查现牌/靓号数据时用 query_plates。带图/文档的消息如果系统没有入库,说明素材不是车牌清单,按普通消息正常聊天即可。
 ${config.CARINFO_API_KEY ? `- 搜车源:用户表达想找车/搜车/看车价/比较车时(如"帮我找台五十万以内的阿尔法""有没有便宜的七座车""搵台笋盘""来台宝马 3 系")调用 search_cars,query 传用户的找车要求原句,limit 默认不传(3 台)。
   · 工具会把每台候选车的卡片(价格/比价结论/配置/行情依据)和实拍图**直接发到群里**并引用用户的提问,这些信息用户已经看得到。你收尾时只做简短总结(如"帮你挑了 3 台,图都发上面啦👆 看中哪台说一声"),**不要**再罗列车型/价格/参数明细,也不要自己编任何车辆数据。
   · 工具返回 sent=0 且 ok=true:库里没有符合条件的车,如实告诉用户没找到,并建议放宽条件(比如去掉手数/年限、提高价格上限)。
@@ -515,7 +551,11 @@ ${config.CARINFO_API_KEY ? `- 搜车源:用户表达想找车/搜车/看车价/�
   · **查到结果**:基于结果回答,并说明出自哪篇资料(工具返回里有 source 字段)。不要把检索内容当自己知道的事,要说明是查到的。
   · **查不到**:直接说"知识库里还没有这部分内容",**绝对不要凭印象编造**。可以补一句让同事去管理页补录。
   · 知识库内容和群聊记录是两回事,用户问"群里谁说过什么"时不要用这个工具(那是消息归档,不是知识库)。
-其余问题正常闲聊回答即可。
+${platesQaEnabled ? `- 查询现牌/靓号:用户在群里问"今天有哪些靓号""有没有包含 X 的号码""哪个口岸今天有多少个牌""有没有尾号 88 的号"这类关于中港两地牌(现牌/靓号)的问题时,调用 query_plates,query 传用户问题原句。
+  · 工具返回的 answer 字段是系统从真实数据整理好的答案(号码、数量都是真的),**直接原样转述即可,可以微调语气,但绝对不要增删或改动其中的车牌号/数字**。
+  · 工具返回 empty=true(本地还没有现牌数据):如实说还没有现牌数据,不要编。
+  · 数据可能不是当天的(最近一两天没更新时):工具 answer 里带了日期(如 10-12),如实把那个日期说出来,不要谎称是"今天"。
+` : ''}其余问题正常闲聊回答即可。
 **全局铁律:你的回复里绝对不许出现任何 http(s) 网址/链接(URL)。** 链接一律由系统按真实成功结果从配置注入。你若需要提到表格,说"表格"即可,不要拼任何 URL。`
 
   const messages: Anthropic.MessageParam[] = [
@@ -547,6 +587,8 @@ ${config.CARINFO_API_KEY ? `- 搜车源:用户表达想找车/搜车/看车价/�
         ...(config.KB_ENABLED ? [SEARCH_KNOWLEDGE_TOOL] : []),
         // 搜车工具:没配 CARINFO_API_KEY 就不下发(机器人不知道自己会搜车)
         ...(config.CARINFO_API_KEY ? [SEARCH_CARS_TOOL] : []),
+        // 现牌问答:仅在机器人测试群下发
+        ...(platesQaEnabled ? [QUERY_PLATES_TOOL] : []),
       ],
       messages,
     })
